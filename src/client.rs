@@ -1,4 +1,5 @@
 use log::error;
+use solana_sdk::pubkey::Pubkey;
 use {
     backoff::{future::retry, ExponentialBackoff},
     clap::{Parser, ValueEnum},
@@ -23,6 +24,7 @@ use {
 // type BlocksFilterMap = HashMap<String, SubscribeRequestFilterBlocks>;
 // type BlocksMetaFilterMap = HashMap<String, SubscribeRequestFilterBlocksMeta>;
 
+pub mod adrena;
 pub mod state;
 
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
@@ -75,6 +77,11 @@ impl Args {
     }
 }
 
+// Function to derive PDA (to be implemented)
+fn derive_pda(_seeds: &[&[u8]], _program_id: &Pubkey) -> (Pubkey, u8) {
+    unimplemented!("PDA derivation function not implemented yet")
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env::set_var(
@@ -106,8 +113,24 @@ async fn main() -> anyhow::Result<()> {
             let mut client = args.connect().await.map_err(backoff::Error::transient)?;
             info!("Connected");
 
-            // DO YOU STUFF
+            // SL/TP / Liquidations
 
+            let positions: Vec<adrena::Position> = vec![];
+            let price_feeds: Vec<pyth::PriceFeedV2> = vec![];
+
+            // retrieve all existing Adrena::PositionPDA, index them
+            //    Each time a new position is indexed, check the Custody/Oracle and if it doesn't exist yet, index the Pyth::PriceFeedV2
+            // Now we got all our existing position and price feeds we can start the loop.
+
+            // LOOP
+            //    For each position, 
+            //      Check if it has SL/TP set, if it does, check if triggered based on the price feed
+            //        If it's triggered, do a CPI to closePosition
+            //        If not, do nothing
+            //      Check position Liquidation conditions (based on position current leverage, based on borrow fees)
+            //        If it's in liquidation territory, do a CPI to liquidatePosition
+            //        If not, do nothing
+            
             Ok::<(), backoff::Error<anyhow::Error>>(())
         }
         .inspect_err(|error| error!("failed to connect: {error}"))
