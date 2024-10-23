@@ -8,4 +8,4 @@ OpenSource GRPC rust client (Keeper)
 
 ## Run
 
-`./target/debug/mrsablier -e https://adrena-solanad-ac2e.devnet.rpcpool.com`
+`$> /target/debug/mrsablier --endpoint https://adrena-solanad-ac2e.devnet.rpcpool.com --commitment processed`

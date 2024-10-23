@@ -141,7 +141,7 @@ async fn main() -> anyhow::Result<()> {
                 vec![]
             };
 
-            info!("2 - Subscribing to update/new positions..."); //////////////////////////////////////////////////////////////////////
+            info!("2 - Preparing positions to subscribe to..."); //////////////////////////////////////////////////////////////////////
             let positions = {
                 let mut positions: AccountFilterMap = HashMap::new();
 
@@ -191,11 +191,11 @@ async fn main() -> anyhow::Result<()> {
                     .subscribe_with_request(Some(request))
                     .await
                     .map_err(|e| backoff::Error::transient(anyhow::Error::new(e)))?;
-                info!("stream opened");
+                info!("stream opened!");
                 (subscribe_tx, stream)
             };
 
-            info!("stream opened");
+            info!("4 - Processing stream..."); ////////////////////////////////////////////////////////////////////////////////////////////
             while let Some(message) = stream.next().await {
                 match message {
                     Ok(msg) => {
