@@ -1,5 +1,7 @@
-use solana_sdk::{signature::Signature, transaction::TransactionError};
-use yellowstone_grpc_proto::geyser::SubscribeUpdateTransactionStatus;
+use {
+    solana_sdk::{signature::Signature, transaction::TransactionError},
+    yellowstone_grpc_proto::geyser::SubscribeUpdateTransactionStatus,
+};
 
 #[allow(dead_code)]
 #[derive(Debug)]

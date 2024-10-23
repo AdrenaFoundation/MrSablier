@@ -1,5 +1,4 @@
-use crate::adrena::U128Split::U128Split;
-use solana_sdk::pubkey::Pubkey;
+use {crate::adrena::u128_split::U128Split, solana_sdk::pubkey::Pubkey};
 
 #[derive(PartialEq, Copy, Clone, Default, Debug)]
 pub enum Side {

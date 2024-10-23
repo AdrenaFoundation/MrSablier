@@ -1,5 +1,4 @@
-use solana_sdk::pubkey::Pubkey;
-use yellowstone_grpc_proto::geyser::SubscribeUpdateAccount;
+use {solana_sdk::pubkey::Pubkey, yellowstone_grpc_proto::geyser::SubscribeUpdateAccount};
 
 #[derive(Debug)]
 #[allow(dead_code)]

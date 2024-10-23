@@ -1,8 +1,9 @@
-use std::fmt;
-
-use solana_sdk::signature::Signature;
-use solana_transaction_status::{EncodedTransactionWithStatusMeta, UiTransactionEncoding};
-use yellowstone_grpc_proto::geyser::SubscribeUpdateTransaction;
+use {
+    solana_sdk::signature::Signature,
+    solana_transaction_status::{EncodedTransactionWithStatusMeta, UiTransactionEncoding},
+    std::fmt,
+    yellowstone_grpc_proto::geyser::SubscribeUpdateTransaction,
+};
 
 #[allow(dead_code)]
 pub struct TransactionPretty {

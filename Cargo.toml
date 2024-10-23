@@ -33,7 +33,7 @@ tokio = { version = "1.21.2", features = ["rt-multi-thread"] }
 tonic = "0.12.1"
 yellowstone-grpc-client = "2.0.0"
 yellowstone-grpc-proto = { version = "2.0.0", default-features = true }
-pyth-solana-receiver-sdk = "=0.3.1"
+# pyth-solana-receiver-sdk = "=0.3.1" // Build issue
 
 [profile.release]
 lto = true

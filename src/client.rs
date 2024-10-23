@@ -1,15 +1,16 @@
-use log::error;
-use solana_sdk::pubkey::Pubkey;
 use {
     backoff::{future::retry, ExponentialBackoff},
     clap::{Parser, ValueEnum},
     futures::{future::TryFutureExt, stream::StreamExt},
-    log::info,
+    log::{error, info},
+    solana_sdk::{account::Account, account_info::AccountInfo, pubkey::Pubkey},
     std::{collections::HashMap, env, sync::Arc, time::Duration},
     tokio::sync::Mutex,
     tonic::transport::channel::ClientTlsConfig,
     yellowstone_grpc_client::{GeyserGrpcClient, Interceptor},
     yellowstone_grpc_proto::prelude::{
+        subscribe_request_filter_accounts_filter::Filter as AccountsFilterDataOneof,
+        subscribe_request_filter_accounts_filter_memcmp::Data as AccountsFilterMemcmpOneof,
         CommitmentLevel, SubscribeRequestFilterAccounts, SubscribeRequestFilterBlocks,
         SubscribeRequestFilterBlocksMeta, SubscribeRequestFilterEntry, SubscribeRequestFilterSlots,
         SubscribeRequestFilterTransactions,
@@ -115,22 +116,56 @@ async fn main() -> anyhow::Result<()> {
 
             // SL/TP / Liquidations
 
-            let positions: Vec<adrena::Position> = vec![];
-            let price_feeds: Vec<pyth::PriceFeedV2> = vec![];
+            let positions: Vec<(Pubkey, Account)> = vec![]; //Vec<adrena::Position> = vec![];
+            let price_feeds: Vec<(Pubkey, Account)> = vec![]; //Vec<pyth::PriceFeedV2> = vec![];
+
+            let position_accounts_discriminator_filter = SubscribeRequestFilterAccountsFilter {
+                filter: Some(AccountsFilterDataOneof::Memcmp(
+                    SubscribeRequestFilterAccountsFilterMemcmp {
+                        offset: 0,
+                        data: Some(AccountsFilterMemcmpOneof::Base58(
+                            adrena::Position::discriminator().to_vec(),
+                        )),
+                    },
+                )),
+            };
+            // let price_feed_accounts_filter = SubscribeRequestFilterAccountsFilter {
+            //     filter: Some(AccountsFilterDataOneof::Memcmp(
+            //         SubscribeRequestFilterAccountsFilterMemcmp {
+            //             offset: 0
+            //                 .parse()
+            //                 .map_err(|_| anyhow::anyhow!("invalid offset"))?,
+            //             data: todo!(),
+            //         },
+            //     )),
+            // };
+            let mut position_accounts: AccountFilterMap = HashMap::new();
+            // let mut price_feed_accounts: AccountFilterMap = HashMap::new();
+
+            accounts.insert(
+                "client".to_owned(),
+                SubscribeRequestFilterAccounts {
+                    account: accounts_account,
+                    owner: args.accounts_owner.clone(),
+                    filters,
+                },
+            );
 
             // retrieve all existing Adrena::PositionPDA, index them
             //    Each time a new position is indexed, check the Custody/Oracle and if it doesn't exist yet, index the Pyth::PriceFeedV2
             // Now we got all our existing position and price feeds we can start the loop.
 
-            // LOOP
-            //    For each position, 
+            // go over arrays and convert them to the correct data types (adrena::Position, pyth::PriceFeedV2)
+
+            // LOOP/subscribe to updates on indexed PDA OR index new PDA
+            //    For each position,
             //      Check if it has SL/TP set, if it does, check if triggered based on the price feed
             //        If it's triggered, do a CPI to closePosition
             //        If not, do nothing
             //      Check position Liquidation conditions (based on position current leverage, based on borrow fees)
             //        If it's in liquidation territory, do a CPI to liquidatePosition
             //        If not, do nothing
-            
+
             Ok::<(), backoff::Error<anyhow::Error>>(())
         }
         .inspect_err(|error| error!("failed to connect: {error}"))
