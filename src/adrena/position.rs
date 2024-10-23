@@ -1,4 +1,7 @@
-use {crate::adrena::u128_split::U128Split, solana_sdk::pubkey::Pubkey};
+use {
+    crate::{adrena::u128_split::U128Split, utils},
+    solana_sdk::pubkey::Pubkey,
+};
 
 #[derive(PartialEq, Copy, Clone, Default, Debug)]
 pub enum Side {
@@ -73,6 +76,10 @@ pub struct Position {
 
 impl Position {
     pub const LEN: usize = 8 + std::mem::size_of::<Position>();
+
+    pub fn get_anchor_discriminator() -> Vec<u8> {
+        utils::derive_discriminator("Position").to_vec()
+    }
 
     pub fn is_pending_cleanup_and_close(&self) -> bool {
         self.pending_cleanup_and_close != 0

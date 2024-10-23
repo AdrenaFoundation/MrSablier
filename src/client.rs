@@ -1,34 +1,35 @@
 use {
     backoff::{future::retry, ExponentialBackoff},
-    clap::{Parser, ValueEnum},
-    futures::{future::TryFutureExt, stream::StreamExt},
+    clap::Parser,
+    futures::{future::TryFutureExt, stream::StreamExt, SinkExt},
     log::{error, info},
-    solana_sdk::{account::Account, account_info::AccountInfo, pubkey::Pubkey},
+    solana_sdk::account_info::AccountInfo,
     std::{collections::HashMap, env, sync::Arc, time::Duration},
     tokio::sync::Mutex,
     tonic::transport::channel::ClientTlsConfig,
+    utils::{AccountPretty, TransactionPretty, TransactionStatusPretty},
     yellowstone_grpc_client::{GeyserGrpcClient, Interceptor},
-    yellowstone_grpc_proto::prelude::{
-        subscribe_request_filter_accounts_filter::Filter as AccountsFilterDataOneof,
-        subscribe_request_filter_accounts_filter_memcmp::Data as AccountsFilterMemcmpOneof,
-        CommitmentLevel, SubscribeRequestFilterAccounts, SubscribeRequestFilterBlocks,
-        SubscribeRequestFilterBlocksMeta, SubscribeRequestFilterEntry, SubscribeRequestFilterSlots,
-        SubscribeRequestFilterTransactions,
+    yellowstone_grpc_proto::{
+        geyser::{
+            subscribe_update::UpdateOneof, SubscribeRequest, SubscribeRequestFilterAccountsFilter,
+            SubscribeRequestFilterAccountsFilterMemcmp, SubscribeRequestPing,
+        },
+        prelude::{
+            subscribe_request_filter_accounts_filter::Filter as AccountsFilterDataOneof,
+            subscribe_request_filter_accounts_filter_memcmp::Data as AccountsFilterMemcmpOneof,
+            CommitmentLevel, SubscribeRequestFilterAccounts,
+        },
     },
 };
 
-// type SlotsFilterMap = HashMap<String, SubscribeRequestFilterSlots>;
-// type AccountFilterMap = HashMap<String, SubscribeRequestFilterAccounts>;
-// type TransactionsFilterMap = HashMap<String, SubscribeRequestFilterTransactions>;
-// type TransactionsStatusFilterMap = HashMap<String, SubscribeRequestFilterTransactions>;
-// type EntryFilterMap = HashMap<String, SubscribeRequestFilterEntry>;
-// type BlocksFilterMap = HashMap<String, SubscribeRequestFilterBlocks>;
-// type BlocksMetaFilterMap = HashMap<String, SubscribeRequestFilterBlocksMeta>;
+type AccountFilterMap = HashMap<String, SubscribeRequestFilterAccounts>;
+
+pub const ADRENA_PROGRAM: &str = "13gDzEXCdocbj8iAiqrScGo47NiSuYENGsRqi3SEAwet";
 
 pub mod adrena;
-pub mod state;
+pub mod utils;
 
-#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+#[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
 enum ArgsCommitment {
     #[default]
     Processed,
@@ -78,11 +79,6 @@ impl Args {
     }
 }
 
-// Function to derive PDA (to be implemented)
-fn derive_pda(_seeds: &[&[u8]], _program_id: &Pubkey) -> (Pubkey, u8) {
-    unimplemented!("PDA derivation function not implemented yet")
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env::set_var(
@@ -114,42 +110,143 @@ async fn main() -> anyhow::Result<()> {
             let mut client = args.connect().await.map_err(backoff::Error::transient)?;
             info!("Connected");
 
-            // SL/TP / Liquidations
+            // TODO:
+            // - implement the initial catchup with Steambot once Triton answers on TG
+            // - implement a new step to check for price feeds required by the positions and subscribe to them
 
-            let positions: Vec<(Pubkey, Account)> = vec![]; //Vec<adrena::Position> = vec![];
-            let price_feeds: Vec<(Pubkey, Account)> = vec![]; //Vec<pyth::PriceFeedV2> = vec![];
+            info!("1 - Retrieving existing positions (using Steamboat custom index)..."); /////////////////////////////////////////////////
+            let existing_positions: Vec<AccountInfo> = {
+                // let mut positions: AccountFilterMap = HashMap::new();
 
-            let position_accounts_discriminator_filter = SubscribeRequestFilterAccountsFilter {
-                filter: Some(AccountsFilterDataOneof::Memcmp(
-                    SubscribeRequestFilterAccountsFilterMemcmp {
-                        offset: 0,
-                        data: Some(AccountsFilterMemcmpOneof::Base58(
-                            adrena::Position::discriminator().to_vec(),
-                        )),
-                    },
-                )),
+                // let position_accounts_discriminator_filter = SubscribeRequestFilterAccountsFilter {
+                //     filter: Some(AccountsFilterDataOneof::Memcmp(
+                //         SubscribeRequestFilterAccountsFilterMemcmp {
+                //             offset: 0,
+                //             data: Some(AccountsFilterMemcmpOneof::Base58(
+                //                 adrena::Position::discriminator().to_vec(),
+                //             )),
+                //         },
+                //     )),
+                // };
+
+                // positions.insert(
+                //     "position".to_owned(),
+                //     SubscribeRequestFilterAccounts {
+                //         account: accounts_account,
+                //         owner: args.accounts_owner.clone(),
+                //         filters,
+                //     },
+                // );
+                // info!("Retrieved {} positions", positions.len());
+                vec![]
             };
-            // let price_feed_accounts_filter = SubscribeRequestFilterAccountsFilter {
-            //     filter: Some(AccountsFilterDataOneof::Memcmp(
-            //         SubscribeRequestFilterAccountsFilterMemcmp {
-            //             offset: 0
-            //                 .parse()
-            //                 .map_err(|_| anyhow::anyhow!("invalid offset"))?,
-            //             data: todo!(),
-            //         },
-            //     )),
-            // };
-            let mut position_accounts: AccountFilterMap = HashMap::new();
-            // let mut price_feed_accounts: AccountFilterMap = HashMap::new();
 
-            accounts.insert(
-                "client".to_owned(),
-                SubscribeRequestFilterAccounts {
-                    account: accounts_account,
-                    owner: args.accounts_owner.clone(),
-                    filters,
-                },
-            );
+            info!("2 - Subscribing to update/new positions..."); //////////////////////////////////////////////////////////////////////
+            let positions = {
+                let mut positions: AccountFilterMap = HashMap::new();
+
+                let mut filters: Vec<SubscribeRequestFilterAccountsFilter> = vec![];
+
+                // Filter by anchor discriminator in order to subscribe to newly created Adrena::Position PDA
+                filters.push(SubscribeRequestFilterAccountsFilter {
+                    filter: Some(AccountsFilterDataOneof::Memcmp(
+                        SubscribeRequestFilterAccountsFilterMemcmp {
+                            offset: 0,
+                            data: Some(AccountsFilterMemcmpOneof::Bytes(
+                                adrena::Position::get_anchor_discriminator(),
+                            )),
+                        },
+                    )),
+                });
+
+                // Subscribe to previously retrieved existing positions to subscribe to updates on them
+                positions.insert(
+                    "position".to_owned(),
+                    SubscribeRequestFilterAccounts {
+                        account: existing_positions
+                            .iter()
+                            .map(|p| p.key.to_string())
+                            .collect(),
+                        owner: existing_positions
+                            .iter()
+                            .map(|p| p.owner.to_string())
+                            .collect(),
+                        filters,
+                    },
+                );
+                positions
+            };
+
+            info!("3 - Opening stream..."); ///////////////////////////////////////////////////////////////////////////////////////////////
+            let (mut subscribe_tx, mut stream) = {
+                let request = SubscribeRequest {
+                    // This is necessary to keep load balancers that expect client pings alive. If your load balancer doesn't
+                    // require periodic client pings then this is unnecessary
+                    ping: Some(SubscribeRequestPing { id: 1 }),
+                    accounts: positions,
+                    commitment: commitment.map(|c| c.into()),
+                    ..Default::default()
+                };
+                let (subscribe_tx, stream) = client
+                    .subscribe_with_request(Some(request))
+                    .await
+                    .map_err(|e| backoff::Error::transient(anyhow::Error::new(e)))?;
+                info!("stream opened");
+                (subscribe_tx, stream)
+            };
+
+            info!("stream opened");
+            while let Some(message) = stream.next().await {
+                match message {
+                    Ok(msg) => {
+                        match msg.update_oneof {
+                            Some(UpdateOneof::Account(account)) => {
+                                let account: AccountPretty = account.into();
+                                info!(
+                                    "new account update: filters {:?}, account: {:#?}",
+                                    msg.filters, account
+                                );
+                                continue;
+                            }
+                            Some(UpdateOneof::Transaction(tx)) => {
+                                let tx: TransactionPretty = tx.into();
+                                info!(
+                                    "new transaction update: filters {:?}, transaction: {:#?}",
+                                    msg.filters, tx
+                                );
+                                continue;
+                            }
+                            Some(UpdateOneof::TransactionStatus(status)) => {
+                                let status: TransactionStatusPretty = status.into();
+                                info!(
+                            "new transaction update: filters {:?}, transaction status: {:?}",
+                            msg.filters, status
+                        );
+                                continue;
+                            }
+                            Some(UpdateOneof::Ping(_)) => {
+                                // This is necessary to keep load balancers that expect client pings alive. If your load balancer doesn't
+                                // require periodic client pings then this is unnecessary
+                                subscribe_tx
+                                    .send(SubscribeRequest {
+                                        ping: Some(SubscribeRequestPing { id: 1 }),
+                                        ..Default::default()
+                                    })
+                                    .await
+                                    .map_err(|e| {
+                                        backoff::Error::transient(anyhow::Error::new(e))
+                                    })?;
+                            }
+                            _ => {}
+                        }
+                        info!("new message: {msg:?}")
+                    }
+                    Err(error) => {
+                        error!("error: {error:?}");
+                        break;
+                    }
+                }
+            }
 
             // retrieve all existing Adrena::PositionPDA, index them
             //    Each time a new position is indexed, check the Custody/Oracle and if it doesn't exist yet, index the Pyth::PriceFeedV2
