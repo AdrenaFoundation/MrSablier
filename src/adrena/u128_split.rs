@@ -3,7 +3,7 @@ use {
     std::ops::{AddAssign, SubAssign},
 };
 
-#[derive(BorshDeserialize, BorshSerialize)]
+#[derive(BorshDeserialize, BorshSerialize, Default, Debug, Copy, Clone, PartialEq)]
 #[repr(C)]
 pub struct U128Split {
     high: u64,

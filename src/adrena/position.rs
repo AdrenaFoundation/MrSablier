@@ -36,7 +36,7 @@ impl TryFrom<u8> for Side {
     }
 }
 
-#[derive(BorshDeserialize, BorshSerialize)]
+#[derive(BorshDeserialize, BorshSerialize, Default, Debug)]
 #[repr(C)]
 pub struct Position {
     pub bump: u8,

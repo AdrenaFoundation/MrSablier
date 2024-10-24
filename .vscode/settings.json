@@ -7,6 +7,7 @@
         "pdas",
         "proto",
         "pyth",
-        "thiserror"
+        "thiserror",
+        "Zeroable"
     ]
 }

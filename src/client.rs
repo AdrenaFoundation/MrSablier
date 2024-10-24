@@ -10,7 +10,13 @@ use {
         rpc_filter::{Memcmp, RpcFilterType},
     },
     solana_sdk::{account::Account, pubkey::Pubkey},
-    std::{collections::HashMap, env, str::FromStr, sync::Arc, time::Duration},
+    std::{
+        collections::{HashMap, HashSet},
+        env,
+        str::FromStr,
+        sync::Arc,
+        time::Duration,
+    },
     tokio::sync::Mutex,
     tonic::transport::channel::ClientTlsConfig,
     utils::AccountPretty,
@@ -131,12 +137,12 @@ async fn main() -> anyhow::Result<()> {
                 existing_positions.len()
             );
 
-            info!("  <> parse existing positions to retrieve oracle price feeds...");
-            // let oracle_price_feeds =
-            //     parse_existing_positions_to_retrieve_oracle_price_feeds(&rpc, &existing_positions)
-            //         .await?;
+            info!("1.1 - parse existing positions to retrieve oracle price feeds...");
+            let oracle_price_feeds =
+                parse_existing_positions_to_retrieve_oracle_price_feeds(&rpc, &existing_positions)
+                    .await?;
 
-            info!("2 - Preparing positions to subscribe to..."); //////////////////////////////////////////////////////////////////////
+            info!("1 - Preparing positions to subscribe to..."); //////////////////////////////////////////////////////////////////////
             let positions = {
                 let mut positions: AccountFilterMap = HashMap::new();
 
@@ -285,37 +291,44 @@ async fn fetch_existing_positions(
     Ok(positions_pdas)
 }
 
-// async fn parse_existing_positions_to_retrieve_oracle_price_feeds(
-//     rpc: &RpcClient,
-//     existing_positions: &[(Pubkey, Account)],
-// ) -> Result<HashMap<Pubkey, f64>, backoff::Error<anyhow::Error>> {
-//     let mut custodies: HashMap<Pubkey, Pubkey> = HashMap::new();
+async fn parse_existing_positions_to_retrieve_oracle_price_feeds(
+    rpc: &RpcClient,
+    existing_positions: &[(Pubkey, Account)],
+) -> Result<HashSet<Pubkey>, backoff::Error<anyhow::Error>> {
+    let mut custodies: HashSet<Pubkey> = HashSet::new();
 
-//     for (pubkey, account) in existing_positions {
-//         // Deserialize position to get custody
-//         let position: adrena::Position =
-//             borsh::BorshDeserialize::deserialize(&mut account.data.as_slice()).map_err(|e| {
-//                 error!("failed to deserialize position: {e}");
-//                 e
-//             })?;
-//         custodies.insert(*pubkey, position.custody);
-//     }
+    for (_, position_acc) in existing_positions {
+        // Deserialize position to get custody
+        let position: adrena::Position =
+            borsh::BorshDeserialize::deserialize(&mut &position_acc.data[8..])
+                .map_err(|e| backoff::Error::transient(e.into()))?;
+        info!("  <> position: {:#?}", position);
+        custodies.insert(position.custody);
+    }
+    info!("  <> fetched {} custodies", custodies.len());
 
-//     let mut oracle_prices: HashMap<Pubkey, f64> = HashMap::new();
+    // If there are no custodies, return an empty set
+    if custodies.is_empty() {
+        return Ok(HashSet::new());
+    }
 
-//     for custody_pubkey in custodies.values() {
-//         // Fetch custody account
-//         let custody_account = rpc.get_account(custody_pubkey).await?;
-//         // Deserialize to get oracle price
-//         let custody: adrena::Custody = borsh::BorshDeserialize::deserialize(
-//             &mut custody_account.data.as_slice(),
-//         )
-//         .map_err(|e| {
-    
-//             e
-//         })?;
-//         oracle_prices.insert(*custody_pubkey, custody.oracle_price);
-//     }
+    let mut oracle_price_feeds: HashSet<Pubkey> = HashSet::new();
 
-//     Ok(oracle_prices)
-// }
+    for custody_key in custodies {
+        let custody_acc = rpc
+            .get_account(&custody_key)
+            .await
+            .map_err(|e| backoff::Error::transient(e.into()))?;
+        // Deserialize to get oracle price
+        let custody: adrena::Custody =
+            borsh::BorshDeserialize::deserialize(&mut &custody_acc.data[8..])
+                .map_err(|e| backoff::Error::transient(e.into()))?;
+        oracle_price_feeds.insert(custody.trade_oracle);
+    }
+    info!(
+        "  <> fetched {} oracle price feeds",
+        oracle_price_feeds.len()
+    );
+
+    Ok(oracle_price_feeds)
+}
