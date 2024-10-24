@@ -1,8 +1,12 @@
 {
     "cSpell.words": [
         "adrena",
+        "borsh",
+        "nonblocking",
         "Oneof",
+        "pdas",
         "proto",
-        "pyth"
+        "pyth",
+        "thiserror"
     ]
 }

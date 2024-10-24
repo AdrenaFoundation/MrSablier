@@ -3,11 +3,17 @@ use {
     clap::Parser,
     futures::{future::TryFutureExt, stream::StreamExt, SinkExt},
     log::{error, info},
-    solana_sdk::account_info::AccountInfo,
-    std::{collections::HashMap, env, sync::Arc, time::Duration},
+    solana_account_decoder::UiAccountEncoding,
+    solana_client::{
+        nonblocking::rpc_client::RpcClient,
+        rpc_config::{RpcAccountInfoConfig, RpcProgramAccountsConfig},
+        rpc_filter::{Memcmp, RpcFilterType},
+    },
+    solana_sdk::{account::Account, pubkey::Pubkey},
+    std::{collections::HashMap, env, str::FromStr, sync::Arc, time::Duration},
     tokio::sync::Mutex,
     tonic::transport::channel::ClientTlsConfig,
-    utils::{AccountPretty, TransactionPretty, TransactionStatusPretty},
+    utils::AccountPretty,
     yellowstone_grpc_client::{GeyserGrpcClient, Interceptor},
     yellowstone_grpc_proto::{
         geyser::{
@@ -107,39 +113,28 @@ async fn main() -> anyhow::Result<()> {
             drop(zero_attempts);
 
             let commitment = args.get_commitment();
-            let mut client = args.connect().await.map_err(backoff::Error::transient)?;
+            let mut grpc = args
+                .connect()
+                .await
+                .map_err(|e| backoff::Error::transient(e.into()))?;
+            let rpc = RpcClient::new(args.endpoint.clone());
             info!("Connected");
 
             // TODO:
-            // - implement the initial catchup with Steambot once Triton answers on TG
             // - implement a new step to check for price feeds required by the positions and subscribe to them
 
-            info!("1 - Retrieving existing positions (using Steamboat custom index)..."); /////////////////////////////////////////////////
-            let existing_positions: Vec<AccountInfo> = {
-                // let mut positions: AccountFilterMap = HashMap::new();
+            info!("1 - Retrieving existing positions..."); /////////////////////////////////////////////////
+            let existing_positions =
+                fetch_existing_positions(&rpc, &Pubkey::from_str(ADRENA_PROGRAM).unwrap()).await?;
+            info!(
+                "  <> # of existing positions retrieved: {}",
+                existing_positions.len()
+            );
 
-                // let position_accounts_discriminator_filter = SubscribeRequestFilterAccountsFilter {
-                //     filter: Some(AccountsFilterDataOneof::Memcmp(
-                //         SubscribeRequestFilterAccountsFilterMemcmp {
-                //             offset: 0,
-                //             data: Some(AccountsFilterMemcmpOneof::Base58(
-                //                 adrena::Position::discriminator().to_vec(),
-                //             )),
-                //         },
-                //     )),
-                // };
-
-                // positions.insert(
-                //     "position".to_owned(),
-                //     SubscribeRequestFilterAccounts {
-                //         account: accounts_account,
-                //         owner: args.accounts_owner.clone(),
-                //         filters,
-                //     },
-                // );
-                // info!("Retrieved {} positions", positions.len());
-                vec![]
-            };
+            info!("  <> parse existing positions to retrieve oracle price feeds...");
+            // let oracle_price_feeds =
+            //     parse_existing_positions_to_retrieve_oracle_price_feeds(&rpc, &existing_positions)
+            //         .await?;
 
             info!("2 - Preparing positions to subscribe to..."); //////////////////////////////////////////////////////////////////////
             let positions = {
@@ -163,17 +158,15 @@ async fn main() -> anyhow::Result<()> {
                 positions.insert(
                     "position".to_owned(),
                     SubscribeRequestFilterAccounts {
-                        account: existing_positions
-                            .iter()
-                            .map(|p| p.key.to_string())
-                            .collect(),
+                        account: existing_positions.iter().map(|p| p.0.to_string()).collect(),
                         owner: existing_positions
                             .iter()
-                            .map(|p| p.owner.to_string())
+                            .map(|p| p.1.owner.to_string())
                             .collect(),
                         filters,
                     },
                 );
+                // info!("positions: {:#?}", positions);
                 positions
             };
 
@@ -182,16 +175,15 @@ async fn main() -> anyhow::Result<()> {
                 let request = SubscribeRequest {
                     // This is necessary to keep load balancers that expect client pings alive. If your load balancer doesn't
                     // require periodic client pings then this is unnecessary
-                    ping: Some(SubscribeRequestPing { id: 1 }),
+                    ping: None, //Some(SubscribeRequestPing { id: 1 }),
                     accounts: positions,
                     commitment: commitment.map(|c| c.into()),
                     ..Default::default()
                 };
-                let (subscribe_tx, stream) = client
+                let (subscribe_tx, stream) = grpc
                     .subscribe_with_request(Some(request))
                     .await
-                    .map_err(|e| backoff::Error::transient(anyhow::Error::new(e)))?;
-                info!("stream opened!");
+                    .map_err(|e| backoff::Error::transient(e.into()))?;
                 (subscribe_tx, stream)
             };
 
@@ -208,22 +200,22 @@ async fn main() -> anyhow::Result<()> {
                                 );
                                 continue;
                             }
-                            Some(UpdateOneof::Transaction(tx)) => {
-                                let tx: TransactionPretty = tx.into();
-                                info!(
-                                    "new transaction update: filters {:?}, transaction: {:#?}",
-                                    msg.filters, tx
-                                );
-                                continue;
-                            }
-                            Some(UpdateOneof::TransactionStatus(status)) => {
-                                let status: TransactionStatusPretty = status.into();
-                                info!(
-                            "new transaction update: filters {:?}, transaction status: {:?}",
-                            msg.filters, status
-                        );
-                                continue;
-                            }
+                            // Some(UpdateOneof::Transaction(tx)) => {
+                            //     let tx: TransactionPretty = tx.into();
+                            //     info!(
+                            //         "new transaction update: filters {:?}, transaction: {:#?}",
+                            //         msg.filters, tx
+                            //     );
+                            //     continue;
+                            // }
+                            //     Some(UpdateOneof::TransactionStatus(status)) => {
+                            //         let status: TransactionStatusPretty = status.into();
+                            //         info!(
+                            //     "new transaction update: filters {:?}, transaction status: {:?}",
+                            //     msg.filters, status
+                            // );
+                            //         continue;
+                            //     }
                             Some(UpdateOneof::Ping(_)) => {
                                 // This is necessary to keep load balancers that expect client pings alive. If your load balancer doesn't
                                 // require periodic client pings then this is unnecessary
@@ -233,9 +225,7 @@ async fn main() -> anyhow::Result<()> {
                                         ..Default::default()
                                     })
                                     .await
-                                    .map_err(|e| {
-                                        backoff::Error::transient(anyhow::Error::new(e))
-                                    })?;
+                                    .map_err(|e| backoff::Error::transient(e.into()))?;
                             }
                             _ => {}
                         }
@@ -270,3 +260,62 @@ async fn main() -> anyhow::Result<()> {
     .await
     .map_err(Into::into)
 }
+
+async fn fetch_existing_positions(
+    rpc: &RpcClient,
+    program_id: &Pubkey,
+) -> Result<Vec<(Pubkey, Account)>, backoff::Error<anyhow::Error>> {
+    let account_type_filter = RpcFilterType::Memcmp(Memcmp::new_base58_encoded(
+        0,
+        &adrena::Position::get_anchor_discriminator(),
+    ));
+    let config = RpcProgramAccountsConfig {
+        filters: Some([vec![account_type_filter]].concat()),
+        account_config: RpcAccountInfoConfig {
+            encoding: Some(UiAccountEncoding::Base64),
+            ..RpcAccountInfoConfig::default()
+        },
+        ..RpcProgramAccountsConfig::default()
+    };
+
+    let positions_pdas = rpc
+        .get_program_accounts_with_config(program_id, config)
+        .await
+        .map_err(|e| backoff::Error::transient(e.into()))?;
+    Ok(positions_pdas)
+}
+
+// async fn parse_existing_positions_to_retrieve_oracle_price_feeds(
+//     rpc: &RpcClient,
+//     existing_positions: &[(Pubkey, Account)],
+// ) -> Result<HashMap<Pubkey, f64>, backoff::Error<anyhow::Error>> {
+//     let mut custodies: HashMap<Pubkey, Pubkey> = HashMap::new();
+
+//     for (pubkey, account) in existing_positions {
+//         // Deserialize position to get custody
+//         let position: adrena::Position =
+//             borsh::BorshDeserialize::deserialize(&mut account.data.as_slice()).map_err(|e| {
+//                 error!("failed to deserialize position: {e}");
+//                 e
+//             })?;
+//         custodies.insert(*pubkey, position.custody);
+//     }
+
+//     let mut oracle_prices: HashMap<Pubkey, f64> = HashMap::new();
+
+//     for custody_pubkey in custodies.values() {
+//         // Fetch custody account
+//         let custody_account = rpc.get_account(custody_pubkey).await?;
+//         // Deserialize to get oracle price
+//         let custody: adrena::Custody = borsh::BorshDeserialize::deserialize(
+//             &mut custody_account.data.as_slice(),
+//         )
+//         .map_err(|e| {
+    
+//             e
+//         })?;
+//         oracle_prices.insert(*custody_pubkey, custody.oracle_price);
+//     }
+
+//     Ok(oracle_prices)
+// }

@@ -1,5 +1,6 @@
 use {
     crate::{adrena::u128_split::U128Split, utils},
+    borsh::{BorshDeserialize, BorshSerialize},
     solana_sdk::pubkey::Pubkey,
 };
 
@@ -35,6 +36,7 @@ impl TryFrom<u8> for Side {
     }
 }
 
+#[derive(BorshDeserialize, BorshSerialize)]
 #[repr(C)]
 pub struct Position {
     pub bump: u8,

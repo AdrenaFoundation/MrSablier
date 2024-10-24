@@ -1,6 +1,9 @@
-use std::ops::{AddAssign, SubAssign};
+use {
+    borsh::{BorshDeserialize, BorshSerialize},
+    std::ops::{AddAssign, SubAssign},
+};
 
-// U128Split is a struct that represents a u128 as two u64s for zero_copy needs
+#[derive(BorshDeserialize, BorshSerialize)]
 #[repr(C)]
 pub struct U128Split {
     high: u64,
