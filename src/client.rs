@@ -19,7 +19,7 @@ use {
     },
     tokio::sync::Mutex,
     tonic::transport::channel::ClientTlsConfig,
-    utils::AccountPretty,
+    utils::{AccountPretty, TransactionPretty, TransactionStatusPretty},
     yellowstone_grpc_client::{GeyserGrpcClient, Interceptor},
     yellowstone_grpc_proto::{
         geyser::{
@@ -37,8 +37,13 @@ use {
 type AccountFilterMap = HashMap<String, SubscribeRequestFilterAccounts>;
 
 pub const ADRENA_PROGRAM: &str = "13gDzEXCdocbj8iAiqrScGo47NiSuYENGsRqi3SEAwet";
+// pub const PYTH_ORACLE_PROGRAM: &str = "FsJ3A3u2vn5cTVofAjvy6y5kwABJAqYWpe4975bi2epH";
+
+// https://solscan.io/account/rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ
+pub const PYTH_RECEIVER_PROGRAM: &str = "rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ";
 
 pub mod adrena;
+pub mod pyth;
 pub mod utils;
 
 #[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
@@ -130,50 +135,81 @@ async fn main() -> anyhow::Result<()> {
             // - implement a new step to check for price feeds required by the positions and subscribe to them
 
             info!("1 - Retrieving existing positions..."); /////////////////////////////////////////////////
-            let existing_positions =
+            let existing_positions_pda =
                 fetch_existing_positions(&rpc, &Pubkey::from_str(ADRENA_PROGRAM).unwrap()).await?;
             info!(
                 "  <> # of existing positions retrieved: {}",
-                existing_positions.len()
+                existing_positions_pda.len()
             );
 
-            info!("1.1 - parse existing positions to retrieve oracle price feeds...");
-            let oracle_price_feeds =
-                parse_existing_positions_to_retrieve_oracle_price_feeds(&rpc, &existing_positions)
-                    .await?;
+            info!("1.1 - parse existing positions to retrieve their associated price feeds...");
+            let price_update_v2_pdas =
+                get_associated_price_update_v2_pdas(&rpc, &existing_positions_pda).await?;
 
-            info!("1 - Preparing positions to subscribe to..."); //////////////////////////////////////////////////////////////////////
-            let positions = {
-                let mut positions: AccountFilterMap = HashMap::new();
+            info!("1 - Preparing account filter map for [position_pdas, price_update_v2_pdas]..."); //////////////////////////////////////////////////////////////////////
+            let accounts_filter_map = {
+                let mut accounts_filter_map: AccountFilterMap = HashMap::new();
 
-                let mut filters: Vec<SubscribeRequestFilterAccountsFilter> = vec![];
+                // // Positions
+                // let existing_positions_pubkeys = existing_positions_pda
+                //     .iter()
+                //     .map(|p| p.0.to_string())
+                //     .collect();
+                // // let position_filter_discriminator = SubscribeRequestFilterAccountsFilter {
+                // //     filter: Some(AccountsFilterDataOneof::Memcmp(
+                // //         SubscribeRequestFilterAccountsFilterMemcmp {
+                // //             offset: 0,
+                // //             data: Some(AccountsFilterMemcmpOneof::Bytes(
+                // //                 adrena::Position::get_anchor_discriminator(),
+                // //             )),
+                // //         },
+                // //     )),
+                // // };
+                // let position_filter_size = SubscribeRequestFilterAccountsFilter {
+                //     filter: Some(AccountsFilterDataOneof::Datasize(
+                //         adrena::Position::LEN as u64,
+                //     )),
+                // };
+                // let position_owner = vec![ADRENA_PROGRAM.to_owned()];
+                // accounts_filter_map.insert(
+                //     "position".to_owned(),
+                //     SubscribeRequestFilterAccounts {
+                //         // Subscribe to all existing positions
+                //         account: existing_positions_pubkeys,
+                //         // Subscribe to positions owned by Adrena program
+                //         owner: position_owner,
+                //         // Filter by size
+                //         filters: vec![position_filter_size],
+                //     },
+                // );
 
-                // Filter by anchor discriminator in order to subscribe to newly created Adrena::Position PDA
-                filters.push(SubscribeRequestFilterAccountsFilter {
-                    filter: Some(AccountsFilterDataOneof::Memcmp(
-                        SubscribeRequestFilterAccountsFilterMemcmp {
-                            offset: 0,
-                            data: Some(AccountsFilterMemcmpOneof::Bytes(
-                                adrena::Position::get_anchor_discriminator(),
-                            )),
-                        },
-                    )),
-                });
-
-                // Subscribe to previously retrieved existing positions to subscribe to updates on them
-                positions.insert(
-                    "position".to_owned(),
+                // Price update v2 pdas
+                let price_update_v2_pdas_pubkeys: Vec<String> =
+                    price_update_v2_pdas.iter().map(|p| p.to_string()).collect();
+                info!(
+                    "  <> # of price update v2 pdas: {}",
+                    price_update_v2_pdas_pubkeys.len()
+                );
+                info!(
+                    "  <> price update v2 pdas: {:?}",
+                    price_update_v2_pdas_pubkeys
+                );
+                let price_feed_owner = vec![PYTH_RECEIVER_PROGRAM.to_owned()];
+                // let price_update_v2_filter_size = SubscribeRequestFilterAccountsFilter {
+                //     filter: Some(AccountsFilterDataOneof::Datasize(
+                //         pyth::PriceUpdateV2::PriceUpdateV2::LEN as u64,
+                //     )),
+                // };
+                accounts_filter_map.insert(
+                    "price_update_v2".to_owned(),
                     SubscribeRequestFilterAccounts {
-                        account: existing_positions.iter().map(|p| p.0.to_string()).collect(),
-                        owner: existing_positions
-                            .iter()
-                            .map(|p| p.1.owner.to_string())
-                            .collect(),
-                        filters,
+                        account: price_update_v2_pdas_pubkeys,
+                        owner: vec![], //price_feed_owner,
+                        filters: vec![],
                     },
                 );
-                // info!("positions: {:#?}", positions);
-                positions
+
+                accounts_filter_map
             };
 
             info!("3 - Opening stream..."); ///////////////////////////////////////////////////////////////////////////////////////////////
@@ -181,11 +217,12 @@ async fn main() -> anyhow::Result<()> {
                 let request = SubscribeRequest {
                     // This is necessary to keep load balancers that expect client pings alive. If your load balancer doesn't
                     // require periodic client pings then this is unnecessary
-                    ping: None, //Some(SubscribeRequestPing { id: 1 }),
-                    accounts: positions,
+                    ping: Some(SubscribeRequestPing { id: 1 }),
+                    accounts: accounts_filter_map,
                     commitment: commitment.map(|c| c.into()),
                     ..Default::default()
                 };
+                info!("Sending subscription request: {:?}", request);
                 let (subscribe_tx, stream) = grpc
                     .subscribe_with_request(Some(request))
                     .await
@@ -206,28 +243,28 @@ async fn main() -> anyhow::Result<()> {
                                 );
                                 continue;
                             }
-                            // Some(UpdateOneof::Transaction(tx)) => {
-                            //     let tx: TransactionPretty = tx.into();
-                            //     info!(
-                            //         "new transaction update: filters {:?}, transaction: {:#?}",
-                            //         msg.filters, tx
-                            //     );
-                            //     continue;
-                            // }
-                            //     Some(UpdateOneof::TransactionStatus(status)) => {
-                            //         let status: TransactionStatusPretty = status.into();
-                            //         info!(
-                            //     "new transaction update: filters {:?}, transaction status: {:?}",
-                            //     msg.filters, status
-                            // );
-                            //         continue;
-                            //     }
+                            Some(UpdateOneof::Transaction(tx)) => {
+                                let tx: TransactionPretty = tx.into();
+                                info!(
+                                    "new transaction update: filters {:?}, transaction: {:#?}",
+                                    msg.filters, tx
+                                );
+                                continue;
+                            }
+                            Some(UpdateOneof::TransactionStatus(status)) => {
+                                let status: TransactionStatusPretty = status.into();
+                                info!(
+                                "new transaction update: filters {:?}, transaction status: {:?}",
+                                msg.filters, status
+                            );
+                                continue;
+                            }
                             Some(UpdateOneof::Ping(_)) => {
                                 // This is necessary to keep load balancers that expect client pings alive. If your load balancer doesn't
                                 // require periodic client pings then this is unnecessary
                                 subscribe_tx
                                     .send(SubscribeRequest {
-                                        ping: Some(SubscribeRequestPing { id: 1 }),
+                                        ping: None, //Some(SubscribeRequestPing { id: 1 }),
                                         ..Default::default()
                                     })
                                     .await
@@ -291,7 +328,7 @@ async fn fetch_existing_positions(
     Ok(positions_pdas)
 }
 
-async fn parse_existing_positions_to_retrieve_oracle_price_feeds(
+async fn get_associated_price_update_v2_pdas(
     rpc: &RpcClient,
     existing_positions: &[(Pubkey, Account)],
 ) -> Result<HashSet<Pubkey>, backoff::Error<anyhow::Error>> {
@@ -302,7 +339,6 @@ async fn parse_existing_positions_to_retrieve_oracle_price_feeds(
         let position: adrena::Position =
             borsh::BorshDeserialize::deserialize(&mut &position_acc.data[8..])
                 .map_err(|e| backoff::Error::transient(e.into()))?;
-        info!("  <> position: {:#?}", position);
         custodies.insert(position.custody);
     }
     info!("  <> fetched {} custodies", custodies.len());
@@ -323,6 +359,7 @@ async fn parse_existing_positions_to_retrieve_oracle_price_feeds(
         let custody: adrena::Custody =
             borsh::BorshDeserialize::deserialize(&mut &custody_acc.data[8..])
                 .map_err(|e| backoff::Error::transient(e.into()))?;
+        info!("  <> custody: {:#?}", custody);
         oracle_price_feeds.insert(custody.trade_oracle);
     }
     info!(

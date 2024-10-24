@@ -2,10 +2,12 @@
     "cSpell.words": [
         "adrena",
         "borsh",
+        "Datasize",
         "nonblocking",
         "Oneof",
         "pdas",
         "proto",
+        "pubkeys",
         "pyth",
         "thiserror",
         "Zeroable"
