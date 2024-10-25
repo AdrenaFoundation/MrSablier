@@ -1,5 +1,5 @@
 use {
-    crate::adrena::BPS_POWER,
+    super::BPS_POWER,
     anyhow::{anyhow, Result},
     std::fmt::Display,
 };

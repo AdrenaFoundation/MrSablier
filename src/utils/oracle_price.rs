@@ -1,5 +1,5 @@
 use {
-    crate::{pyth::price_update_v2::PriceUpdateV2, utils::math},
+    crate::utils::math,
     anyhow::{anyhow, Result},
 };
 
@@ -51,7 +51,9 @@ impl OraclePrice {
         }
     }
 
-    pub fn new_from_pyth_price_update_v2(price_update_v2: &PriceUpdateV2) -> Result<Self> {
+    pub fn new_from_pyth_price_update_v2(
+        price_update_v2: &crate::pyth::PriceUpdateV2,
+    ) -> Result<Self> {
         let pyth_price = price_update_v2.price_message;
 
         // Check for maximum confidence

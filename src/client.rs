@@ -1,25 +1,23 @@
 use {
+    adrena_abi::types::Position,
+    anchor_client::{
+        anchor_lang::AccountDeserialize, solana_sdk::signer::keypair::read_keypair_file, Client,
+        Cluster,
+    },
     backoff::{future::retry, ExponentialBackoff},
     clap::Parser,
     futures::{future::TryFutureExt, stream::StreamExt},
-    pyth::price_update_v2::PriceUpdateV2,
-    solana_account_decoder::UiAccountEncoding,
-    solana_client::{
-        nonblocking::rpc_client::RpcClient,
-        rpc_config::{RpcAccountInfoConfig, RpcProgramAccountsConfig},
-        rpc_filter::{Memcmp, RpcFilterType},
-    },
-    solana_sdk::{account::Account, pubkey::Pubkey},
+    solana_client::rpc_filter::{Memcmp, RpcFilterType},
+    solana_sdk::{pubkey::Pubkey, signature::Keypair},
     std::{
         collections::{HashMap, HashSet},
         env,
-        str::FromStr,
+        rc::Rc,
         sync::Arc,
         time::Duration,
     },
     tokio::sync::{Mutex, RwLock},
     tonic::transport::channel::ClientTlsConfig,
-    utils::AccountPretty,
     yellowstone_grpc_client::{GeyserGrpcClient, Interceptor},
     yellowstone_grpc_proto::{
         geyser::{
@@ -36,13 +34,10 @@ use {
 
 type AccountFilterMap = HashMap<String, SubscribeRequestFilterAccounts>;
 
-pub const ADRENA_PROGRAM: &str = "13gDzEXCdocbj8iAiqrScGo47NiSuYENGsRqi3SEAwet";
 // pub const PYTH_ORACLE_PROGRAM: &str = "FsJ3A3u2vn5cTVofAjvy6y5kwABJAqYWpe4975bi2epH";
-
 // https://solscan.io/account/rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ
 pub const PYTH_RECEIVER_PROGRAM: &str = "rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ";
 
-pub mod adrena;
 pub mod pyth;
 pub mod utils;
 
@@ -77,6 +72,10 @@ struct Args {
     /// Commitment level: processed, confirmed or finalized
     #[clap(long)]
     commitment: Option<ArgsCommitment>,
+
+    /// Path to the payer keypair
+    #[clap(long)]
+    payer_keypair: String,
 }
 
 impl Args {
@@ -89,11 +88,15 @@ impl Args {
             .x_token(self.x_token.clone())?
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(10))
-            .tls_config(ClientTlsConfig::new().with_native_roots())?
+            .tls_config(ClientTlsConfig::new())?
             .connect()
             .await
             .map_err(Into::into)
     }
+}
+
+pub fn get_position_anchor_discriminator() -> Vec<u8> {
+    utils::derive_discriminator("Position").to_vec()
 }
 
 fn create_accounts_filter_map(price_update_v2_pdas_pubkeys: Vec<String>) -> AccountFilterMap {
@@ -105,12 +108,12 @@ fn create_accounts_filter_map(price_update_v2_pdas_pubkeys: Vec<String>) -> Acco
             SubscribeRequestFilterAccountsFilterMemcmp {
                 offset: 0,
                 data: Some(AccountsFilterMemcmpOneof::Bytes(
-                    adrena::Position::get_anchor_discriminator(),
+                    get_position_anchor_discriminator(),
                 )),
             },
         )),
     };
-    let position_owner = vec![ADRENA_PROGRAM.to_owned()];
+    let position_owner = vec![adrena_abi::ID.to_string()];
     accounts_filter_map.insert(
         "position".to_owned(),
         SubscribeRequestFilterAccounts {
@@ -145,8 +148,8 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let zero_attempts = Arc::new(Mutex::new(true));
 
-    // The array of indexed positions - These positions are the ones that we are watching for any updates from the stream and for SL/TP/LIQ conditionss
-    let indexed_positions: Arc<RwLock<HashMap<Pubkey, adrena::Position>>> =
+    // The array of indexed positions - These positions are the ones that we are watching for any updates from the stream and for SL/TP/LIQ conditions
+    let indexed_positions: Arc<RwLock<HashMap<Pubkey, adrena_abi::types::Position>>> =
         Arc::new(RwLock::new(HashMap::new()));
 
     // The default exponential backoff strategy intervals:
@@ -171,44 +174,55 @@ async fn main() -> anyhow::Result<()> {
                 .connect()
                 .await
                 .map_err(|e| backoff::Error::transient(e.into()))?;
-            let rpc = RpcClient::new(args.endpoint.clone());
-            log::info!("  <> gRPC and RPC clients connected!");
+            // let rpc = RpcClient::new(args.endpoint.clone());
 
-            // ////////////////////////////////////////////////////////////////
-            log::info!("1 - Retrieving existing positions...");
-            let existing_positions_pda =
-                fetch_existing_positions_pdas(&rpc, &Pubkey::from_str(ADRENA_PROGRAM).unwrap())
-                    .await?;
-            log::info!(
-                "  <> # of existing positions pdas fetched: {}",
-                existing_positions_pda.len()
+            let payer = read_keypair_file(args.payer_keypair.clone()).unwrap();
+            let client = Client::new(
+                Cluster::Custom(args.endpoint.clone(), args.endpoint.clone()),
+                Rc::new(payer),
             );
-            // ////////////////////////////////////////////////////////////////
+            let program = client
+                .program(adrena_abi::ID)
+                .map_err(|e| backoff::Error::transient(e.into()))?;
+            log::info!("  <> gRPC, RPC clients connected!");
 
             // ////////////////////////////////////////////////////////////////
-            log::info!("1.1 - Loading retrieved positions...");
-            let existing_positions =
-                fetch_and_parse_positions(&rpc, &existing_positions_pda).await?;
+            log::info!("1 - Retrieving and indexing existing positions...");
             {
-                let mut indexed_positions = indexed_positions.write().await;
-                indexed_positions.extend(existing_positions);
+                let position_pda_filter = RpcFilterType::Memcmp(Memcmp::new_base58_encoded(
+                    0,
+                    &get_position_anchor_discriminator(),
+                ));
+                let filters = vec![position_pda_filter];
+                let existing_positions_accounts = program
+                    .accounts::<Position>(filters)
+                    .await
+                    .map_err(|e| backoff::Error::transient(e.into()))?;
+                {
+                    let mut indexed_positions = indexed_positions.write().await;
+                    indexed_positions.extend(existing_positions_accounts);
+                }
+                log::info!(
+                    "  <> # of existing positions parsed and loaded: {}",
+                    indexed_positions.read().await.len()
+                );
             }
-            log::info!(
-                "  <> # of existing positions parsed and loaded: {}",
-                indexed_positions.read().await.len()
-            );
             // ////////////////////////////////////////////////////////////////
 
             // ////////////////////////////////////////////////////////////////
-            log::info!(
-                "1.2 - Parsing existing positions to retrieve their associated price feeds..."
-            );
-            let price_update_v2_pdas =
-                get_associated_price_update_v2_pdas(&rpc, &existing_positions_pda).await?;
-            log::info!(
-                "  <> # of price update v2 pdas fetched: {}",
-                price_update_v2_pdas.len()
-            );
+            let price_update_v2_pdas = {
+                log::info!(
+                    "1.2 - Parsing existing positions to retrieve their associated price feeds..."
+                );
+                let existing_positions = indexed_positions.read().await;
+                let price_update_v2_pdas =
+                    get_associated_price_update_v2_pdas(&program, &existing_positions).await?;
+                log::info!(
+                    "  <> # of price update v2 pdas fetched: {}",
+                    price_update_v2_pdas.len()
+                );
+                price_update_v2_pdas
+            };
             // ////////////////////////////////////////////////////////////////
 
             // The account filter map is what is provided to the subscription request
@@ -272,6 +286,7 @@ async fn main() -> anyhow::Result<()> {
                                         &account_data,
                                         &indexed_positions,
                                         &price_update_v2_pdas,
+                                        &program,
                                     )
                                     .await?;
                                 }
@@ -315,8 +330,9 @@ async fn main() -> anyhow::Result<()> {
 pub async fn check_liquidation_sl_tp_conditions(
     price_update_v2_key: &Pubkey,
     price_update_v2_data: &[u8],
-    indexed_positions: &Arc<RwLock<HashMap<Pubkey, adrena::Position>>>,
+    indexed_positions: &Arc<RwLock<HashMap<Pubkey, adrena_abi::types::Position>>>,
     price_update_v2_pdas: &HashMap<Pubkey, Pubkey>,
+    program: &anchor_client::Program<Rc<Keypair>>,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
     log::debug!("    <> Checking liquidation/sl/tp conditions");
 
@@ -326,10 +342,10 @@ pub async fn check_liquidation_sl_tp_conditions(
             .map_err(|e| backoff::Error::transient(e.into()))?;
     log::debug!("    <> Deserialized price_update_v2");
 
-    // TODO: Optimise this by not creating the OraclePrice struct from the price update v2 account but just using the price and conf directly
+    // TODO: Optimize this by not creating the OraclePrice struct from the price update v2 account but just using the price and conf directly
     // Create an OraclePrice struct from the price update v2 account
-    let oracle_price: adrena::oracle::OraclePrice =
-        adrena::oracle::OraclePrice::new_from_pyth_price_update_v2(&price_update_v2)
+    let oracle_price: utils::oracle_price::OraclePrice =
+        utils::oracle_price::OraclePrice::new_from_pyth_price_update_v2(&price_update_v2)
             .map_err(|e| backoff::Error::transient(e.into()))?;
     log::debug!("    <> Created OraclePrice struct from price_update_v2");
 
@@ -340,16 +356,18 @@ pub async fn check_liquidation_sl_tp_conditions(
         // Check if the price update v2 account is associated with the position's custody
         if price_update_v2_pdas.get(&position_custody) == Some(&price_update_v2_key) {
             // check if the position has a SL set
-            if position.stop_loss_is_set() {
-                match position.get_side() {
-                    adrena::Side::Long => {
+            if position.stop_loss_thread_is_set != 0 {
+                match position.side {
+                    1 => {
+                        // Long side is 1 - update abi
                         // check if the price has crossed the SL
                         if oracle_price.price <= position.stop_loss_limit_price {
                             log::info!("SL condition met for LONG position {:#?}", position_key);
-                            // generate an ix to close the position
+                            // TODO generate close IX pos
                         }
                     }
-                    adrena::Side::Short => {
+                    0 => {
+                        // Short side is 0 - update abi
                         // check if the price has crossed the SL
                         if oracle_price.price >= position.stop_loss_limit_price {
                             log::info!("SL condition met for SHORT position {:#?}", position_key);
@@ -362,16 +380,16 @@ pub async fn check_liquidation_sl_tp_conditions(
             }
 
             // check if the position has a TP set
-            if position.take_profit_is_set() {
+            if position.take_profit_thread_is_set != 0 {
                 // check if the price has crossed the TP
-                match position.get_side() {
-                    adrena::Side::Long => {
+                match position.side {
+                    1 => {
                         if oracle_price.price >= position.take_profit_limit_price {
                             log::info!("TP condition met for LONG position {:#?}", position_key);
                             log::warn!("TODO: a RPC call to close the position @ position.take_profit_close_position_price");
                         }
                     }
-                    adrena::Side::Short => {
+                    0 => {
                         if oracle_price.price <= position.take_profit_limit_price {
                             log::info!("TP condition met for SHORT position {:#?}", position_key);
                             log::warn!("TODO: a RPC call to close the position @ position.take_profit_close_position_price");
@@ -398,7 +416,7 @@ pub async fn check_liquidation_sl_tp_conditions(
 pub async fn update_indexed_positions(
     position_account_key: &Pubkey,
     position_account_data: &[u8],
-    indexed_positions: &Arc<RwLock<HashMap<Pubkey, adrena::Position>>>,
+    indexed_positions: &Arc<RwLock<HashMap<Pubkey, adrena_abi::types::Position>>>,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
     if position_account_data.is_empty() {
         // Position was closed
@@ -425,8 +443,8 @@ pub async fn update_indexed_positions(
             );
         }
         // Either way, update or create, this operation is the same
-        let position: adrena::Position =
-            borsh::BorshDeserialize::deserialize(&mut &position_account_data[8..])
+        let position: adrena_abi::types::Position =
+            adrena_abi::types::Position::try_deserialize(&mut &position_account_data[..])
                 .map_err(|e| backoff::Error::transient(e.into()))?;
         indexed_positions
             .write()
@@ -436,46 +454,20 @@ pub async fn update_indexed_positions(
     Ok(())
 }
 
-// Provided a program id, fetch the pdas of the existing positions
-async fn fetch_existing_positions_pdas(
-    rpc: &RpcClient,
-    program_id: &Pubkey,
-) -> Result<Vec<(Pubkey, Account)>, backoff::Error<anyhow::Error>> {
-    let account_type_filter = RpcFilterType::Memcmp(Memcmp::new_base58_encoded(
-        0,
-        &adrena::Position::get_anchor_discriminator(),
-    ));
-    let config = RpcProgramAccountsConfig {
-        filters: Some([vec![account_type_filter]].concat()),
-        account_config: RpcAccountInfoConfig {
-            encoding: Some(UiAccountEncoding::Base64),
-            ..RpcAccountInfoConfig::default()
-        },
-        ..RpcProgramAccountsConfig::default()
-    };
-
-    let positions_pdas = rpc
-        .get_program_accounts_with_config(program_id, config)
-        .await
-        .map_err(|e| backoff::Error::transient(e.into()))?;
-    Ok(positions_pdas)
-}
-
 // Provided an array of existing positions pdas, get the associated price update v2 pdas indexed by custody
 async fn get_associated_price_update_v2_pdas(
-    rpc: &RpcClient,
-    existing_positions: &[(Pubkey, Account)],
+    program: &anchor_client::Program<Rc<Keypair>>,
+    existing_positions: &HashMap<Pubkey, adrena_abi::types::Position>,
 ) -> Result<HashMap<Pubkey, Pubkey>, backoff::Error<anyhow::Error>> {
     let mut custodies: HashSet<Pubkey> = HashSet::new();
 
-    for (_, position_acc) in existing_positions {
-        // Deserialize position to get custody
-        let position: adrena::Position =
-            borsh::BorshDeserialize::deserialize(&mut &position_acc.data[8..])
-                .map_err(|e| backoff::Error::transient(e.into()))?;
-        custodies.insert(position.custody);
+    for (_, p) in existing_positions {
+        custodies.insert(p.custody);
     }
-    log::info!("  <> fetched {} custodies", custodies.len());
+    log::info!(
+        "  <> Existing positions have {} unique custodies",
+        custodies.len()
+    );
 
     // If there are no custodies, return an empty set
     if custodies.is_empty() {
@@ -485,14 +477,11 @@ async fn get_associated_price_update_v2_pdas(
     let mut oracle_price_feeds: HashMap<Pubkey, Pubkey> = HashMap::new();
 
     for custody_key in custodies {
-        let custody_acc = rpc
-            .get_account(&custody_key)
+        let custody = program
+            .account::<adrena_abi::types::Custody>(custody_key)
             .await
             .map_err(|e| backoff::Error::transient(e.into()))?;
-        // Deserialize to get oracle price
-        let custody: adrena::Custody =
-            borsh::BorshDeserialize::deserialize(&mut &custody_acc.data[8..])
-                .map_err(|e| backoff::Error::transient(e.into()))?;
+
         oracle_price_feeds.insert(custody_key, custody.trade_oracle);
     }
     log::info!(
@@ -501,31 +490,4 @@ async fn get_associated_price_update_v2_pdas(
     );
 
     Ok(oracle_price_feeds)
-}
-
-// Provided an array of existing positions pdas, fetch the data and parse it into adrena::Position structs
-async fn fetch_and_parse_positions(
-    rpc: &RpcClient,
-    existing_positions_pda: &[(Pubkey, Account)],
-) -> Result<HashMap<Pubkey, adrena::Position>, backoff::Error<anyhow::Error>> {
-    let existing_positions_data = rpc
-        .get_multiple_accounts(
-            &existing_positions_pda
-                .iter()
-                .map(|p| p.0)
-                .collect::<Vec<_>>(),
-        )
-        .await
-        .map_err(|e| backoff::Error::transient(e.into()))?;
-
-    let mut positions = HashMap::new();
-    for (i, account) in existing_positions_data.iter().enumerate() {
-        if let Some(account) = account {
-            let position: adrena::Position =
-                borsh::BorshDeserialize::deserialize(&mut &account.data[8..])
-                    .map_err(|e| backoff::Error::transient(e.into()))?;
-            positions.insert(existing_positions_pda[i].0.clone(), position);
-        }
-    }
-    Ok(positions)
 }
