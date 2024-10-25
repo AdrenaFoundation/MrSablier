@@ -1,3 +1,3 @@
-pub mod PriceUpdateV2;
+pub mod price_update_v2;
 
-pub use PriceUpdateV2::*;
+pub use price_update_v2::*;
