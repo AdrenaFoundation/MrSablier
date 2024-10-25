@@ -425,7 +425,6 @@ pub async fn check_liquidation_sl_tp_conditions(
             // check LIQ
             // TODO : recalculate the liquidation price and check if the price has crossed it
             // log::warn!("TODO: check LIQ");
-
         }
     }
     Ok(())
@@ -599,8 +598,8 @@ async fn handle_long_position_sl(
                 transfer_authority: transfer_authority_pda,
                 lm_staking: adrena_abi::pda::get_staking_pda(&ADX_MINT).0,
                 lp_staking: adrena_abi::pda::get_staking_pda(&USDC_MINT).0,
-                cortex: adrena_abi::ID,
-                pool: adrena_abi::ID,
+                cortex: adrena_abi::pda::get_cortex_pda().0,
+                pool: position.pool,
                 position: *position_key,
                 staking_reward_token_custody: USDC_CUSTODY_ID,
                 staking_reward_token_custody_oracle: staking_reward_token_custody.oracle,
