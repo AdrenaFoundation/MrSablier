@@ -9,6 +9,7 @@
         "proto",
         "pubkeys",
         "pyth",
+        "sablier",
         "thiserror",
         "Zeroable"
     ]

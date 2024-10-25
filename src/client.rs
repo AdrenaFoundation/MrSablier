@@ -1,5 +1,9 @@
 use {
-    adrena_abi::types::Position,
+    adrena_abi::{
+        types::{Cortex, Position},
+        ADX_MINT, ALP_MINT, SABLIER_THREAD_PROGRAM_ID, SPL_ASSOCIATED_TOKEN_PROGRAM_ID,
+        SPL_TOKEN_PROGRAM_ID, USDC_CUSTODY_ID, USDC_MINT,
+    },
     anchor_client::{
         anchor_lang::AccountDeserialize, solana_sdk::signer::keypair::read_keypair_file, Client,
         Cluster,
@@ -151,6 +155,9 @@ async fn main() -> anyhow::Result<()> {
     // The array of indexed positions - These positions are the ones that we are watching for any updates from the stream and for SL/TP/LIQ conditions
     let indexed_positions: Arc<RwLock<HashMap<Pubkey, adrena_abi::types::Position>>> =
         Arc::new(RwLock::new(HashMap::new()));
+    // The array of indexed custodies - These are not directly observed, but are needed for instructions and to keep track of which price update v2 accounts are observed
+    let indexed_custodies: Arc<RwLock<HashMap<Pubkey, adrena_abi::types::Custody>>> =
+        Arc::new(RwLock::new(HashMap::new()));
 
     // The default exponential backoff strategy intervals:
     // [500ms, 750ms, 1.125s, 1.6875s, 2.53125s, 3.796875s, 5.6953125s,
@@ -159,6 +166,7 @@ async fn main() -> anyhow::Result<()> {
         let args = args.clone();
         let zero_attempts = Arc::clone(&zero_attempts);
         let indexed_positions = Arc::clone(&indexed_positions);
+        let indexed_custodies = Arc::clone(&indexed_custodies);
 
         async move {
             let mut zero_attempts = zero_attempts.lock().await;
@@ -185,6 +193,22 @@ async fn main() -> anyhow::Result<()> {
                 .program(adrena_abi::ID)
                 .map_err(|e| backoff::Error::transient(e.into()))?;
             log::info!("  <> gRPC, RPC clients connected!");
+
+            // Fetched once
+            let cortex: Cortex = program
+                .account::<Cortex>(adrena_abi::pda::get_cortex_pda().0)
+                .await
+                .map_err(|e| backoff::Error::transient(e.into()))?;
+
+            // Index USDC custody once
+            let usdc_custody = program
+                .account::<adrena_abi::types::Custody>(USDC_CUSTODY_ID)
+                .await
+                .map_err(|e| backoff::Error::transient(e.into()))?;
+            indexed_custodies
+                .write()
+                .await
+                .insert(USDC_CUSTODY_ID, usdc_custody);
 
             // ////////////////////////////////////////////////////////////////
             log::info!("1 - Retrieving and indexing existing positions...");
@@ -214,9 +238,12 @@ async fn main() -> anyhow::Result<()> {
                 log::info!(
                     "1.2 - Parsing existing positions to retrieve their associated price feeds..."
                 );
-                let existing_positions = indexed_positions.read().await;
-                let price_update_v2_pdas =
-                    get_associated_price_update_v2_pdas(&program, &existing_positions).await?;
+                let price_update_v2_pdas = get_associated_price_update_v2_keys(
+                    &program,
+                    &indexed_positions,
+                    &indexed_custodies,
+                )
+                .await?;
                 log::info!(
                     "  <> # of price update v2 pdas fetched: {}",
                     price_update_v2_pdas.len()
@@ -225,6 +252,7 @@ async fn main() -> anyhow::Result<()> {
             };
             // ////////////////////////////////////////////////////////////////
 
+            // ////////////////////////////////////////////////////////////////
             // The account filter map is what is provided to the subscription request
             // to inform the server about the accounts we are interested in observing changes to
             // ////////////////////////////////////////////////////////////////
@@ -285,8 +313,10 @@ async fn main() -> anyhow::Result<()> {
                                         &account_key,
                                         &account_data,
                                         &indexed_positions,
+                                        &indexed_custodies,
                                         &price_update_v2_pdas,
                                         &program,
+                                        &cortex,
                                     )
                                     .await?;
                                 }
@@ -297,6 +327,8 @@ async fn main() -> anyhow::Result<()> {
                                         &account_key,
                                         &account_data,
                                         &indexed_positions,
+                                        &indexed_custodies,
+                                        &program,
                                     )
                                     .await?;
                                 }
@@ -331,8 +363,10 @@ pub async fn check_liquidation_sl_tp_conditions(
     price_update_v2_key: &Pubkey,
     price_update_v2_data: &[u8],
     indexed_positions: &Arc<RwLock<HashMap<Pubkey, adrena_abi::types::Position>>>,
+    indexed_custodies: &Arc<RwLock<HashMap<Pubkey, adrena_abi::types::Custody>>>,
     price_update_v2_pdas: &HashMap<Pubkey, Pubkey>,
     program: &anchor_client::Program<Rc<Keypair>>,
+    cortex: &Cortex,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
     log::debug!("    <> Checking liquidation/sl/tp conditions");
 
@@ -359,11 +393,99 @@ pub async fn check_liquidation_sl_tp_conditions(
             if position.stop_loss_thread_is_set != 0 {
                 match position.side {
                     1 => {
-                        // Long side is 1 - update abi
+                        // Long side is 1
                         // check if the price has crossed the SL
                         if oracle_price.price <= position.stop_loss_limit_price {
                             log::info!("SL condition met for LONG position {:#?}", position_key);
-                            // TODO generate close IX pos
+                            let indexed_custodies_read = indexed_custodies.read().await;
+                            let custody = indexed_custodies_read.get(&position.custody).unwrap();
+                            let collateral_custody = indexed_custodies_read
+                                .get(&position.collateral_custody)
+                                .unwrap();
+                            let staking_reward_token_custody =
+                                indexed_custodies_read.get(&USDC_CUSTODY_ID).unwrap();
+
+                            // let mint = custody.mint;
+                            let collateral_mint = collateral_custody.mint;
+
+                            let receiving_account = Pubkey::find_program_address(
+                                &[
+                                    &position.owner.to_bytes(),
+                                    &SPL_TOKEN_PROGRAM_ID.to_bytes(),
+                                    &collateral_mint.to_bytes(),
+                                ],
+                                &SPL_ASSOCIATED_TOKEN_PROGRAM_ID,
+                            )
+                            .0;
+
+                            let user_profile_pda =
+                                adrena_abi::pda::get_user_profile_pda(&position.owner).0;
+
+                            let transfer_authority_pda =
+                                adrena_abi::pda::get_transfer_authority_pda().0;
+
+                            let position_take_profit_pda = adrena_abi::pda::get_sablier_thread_pda(
+                                &transfer_authority_pda,
+                                position.take_profit_thread_id.to_le_bytes().to_vec(),
+                                Some(position.owner.to_bytes().to_vec()),
+                            )
+                            .0;
+
+                            let position_stop_loss_pda = adrena_abi::pda::get_sablier_thread_pda(
+                                &transfer_authority_pda,
+                                position.stop_loss_thread_id.to_le_bytes().to_vec(),
+                                Some(position.owner.to_bytes().to_vec()),
+                            )
+                            .0;
+
+                            program
+                                .request()
+                                .args(adrena_abi::instruction::ClosePositionLong {
+                                    params: adrena_abi::types::ClosePositionLongParams {
+                                        price: Some(position.stop_loss_close_position_price), // The limit price (slippage)
+                                    },
+                                })
+                                .accounts(adrena_abi::accounts::ClosePositionLong {
+                                    caller: program.payer(),
+                                    owner: position.owner,
+                                    receiving_account,
+                                    transfer_authority: transfer_authority_pda,
+                                    lm_staking: adrena_abi::pda::get_staking_pda(&ADX_MINT).0,
+                                    lp_staking: adrena_abi::pda::get_staking_pda(&USDC_MINT).0,
+                                    cortex: adrena_abi::ID,
+                                    pool: adrena_abi::ID,
+                                    position: *position_key,
+                                    staking_reward_token_custody: USDC_CUSTODY_ID,
+                                    staking_reward_token_custody_oracle:
+                                        staking_reward_token_custody.oracle,
+                                    staking_reward_token_custody_token_account:
+                                        staking_reward_token_custody.token_account,
+                                    custody: position_custody,
+                                    custody_oracle: custody.oracle,
+                                    custody_trade_oracle: custody.trade_oracle,
+                                    custody_token_account: custody.token_account,
+                                    lm_staking_reward_token_vault:
+                                        adrena_abi::pda::get_staking_reward_token_vault_pda(
+                                            &ADX_MINT,
+                                        )
+                                        .0,
+                                    lp_staking_reward_token_vault:
+                                        adrena_abi::pda::get_staking_reward_token_vault_pda(
+                                            &ALP_MINT,
+                                        )
+                                        .0,
+                                    lp_token_mint: ALP_MINT,
+                                    protocol_fee_recipient: cortex.protocol_fee_recipient,
+                                    user_profile: Some(user_profile_pda),
+                                    take_profit_thread: position_take_profit_pda,
+                                    stop_loss_thread: position_stop_loss_pda,
+                                    token_program: SPL_TOKEN_PROGRAM_ID,
+                                    adrena_program: adrena_abi::ID,
+                                    sablier_program: SABLIER_THREAD_PROGRAM_ID,
+                                })
+                                .send()
+                                .await
+                                .map_err(|e| backoff::Error::transient(e.into()))?;
                         }
                     }
                     0 => {
@@ -401,7 +523,7 @@ pub async fn check_liquidation_sl_tp_conditions(
 
             // check LIQ
             // TODO : recalculate the liquidation price and check if the price has crossed it
-            log::warn!("TODO: check LIQ");
+            // log::warn!("TODO: check LIQ");
         }
     }
     Ok(())
@@ -417,6 +539,8 @@ pub async fn update_indexed_positions(
     position_account_key: &Pubkey,
     position_account_data: &[u8],
     indexed_positions: &Arc<RwLock<HashMap<Pubkey, adrena_abi::types::Position>>>,
+    indexed_custodies: &Arc<RwLock<HashMap<Pubkey, adrena_abi::types::Custody>>>,
+    program: &anchor_client::Program<Rc<Keypair>>,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
     if position_account_data.is_empty() {
         // Position was closed
@@ -450,44 +574,64 @@ pub async fn update_indexed_positions(
             .write()
             .await
             .insert(position_account_key.clone(), position);
+
+        // If the indexed_custodies map doesn't have the position's custody, add it
+        if !indexed_custodies
+            .read()
+            .await
+            .contains_key(&position.custody)
+        {
+            let custody = program
+                .account::<adrena_abi::types::Custody>(position.custody)
+                .await
+                .map_err(|e| backoff::Error::transient(e.into()))?;
+            indexed_custodies
+                .write()
+                .await
+                .insert(position.custody, custody);
+        }
     }
     Ok(())
 }
 
 // Provided an array of existing positions pdas, get the associated price update v2 pdas indexed by custody
-async fn get_associated_price_update_v2_pdas(
+async fn get_associated_price_update_v2_keys(
     program: &anchor_client::Program<Rc<Keypair>>,
-    existing_positions: &HashMap<Pubkey, adrena_abi::types::Position>,
+    indexed_positions: &Arc<RwLock<HashMap<Pubkey, adrena_abi::types::Position>>>,
+    indexed_custodies: &Arc<RwLock<HashMap<Pubkey, adrena_abi::types::Custody>>>,
 ) -> Result<HashMap<Pubkey, Pubkey>, backoff::Error<anyhow::Error>> {
-    let mut custodies: HashSet<Pubkey> = HashSet::new();
+    let mut custody_keys: HashSet<Pubkey> = HashSet::new();
 
-    for (_, p) in existing_positions {
-        custodies.insert(p.custody);
+    for (_, p) in indexed_positions.read().await.iter() {
+        custody_keys.insert(p.custody);
     }
     log::info!(
         "  <> Existing positions have {} unique custodies",
-        custodies.len()
+        custody_keys.len()
     );
 
     // If there are no custodies, return an empty set
-    if custodies.is_empty() {
+    if custody_keys.is_empty() {
         return Ok(HashMap::new());
     }
 
-    let mut oracle_price_feeds: HashMap<Pubkey, Pubkey> = HashMap::new();
+    let mut oracle_price_feed_keys: HashMap<Pubkey, Pubkey> = HashMap::new();
 
-    for custody_key in custodies {
+    for custody_key in custody_keys {
         let custody = program
             .account::<adrena_abi::types::Custody>(custody_key)
             .await
             .map_err(|e| backoff::Error::transient(e.into()))?;
 
-        oracle_price_feeds.insert(custody_key, custody.trade_oracle);
+        // insert into the oracle_price_feeds map
+        oracle_price_feed_keys.insert(custody_key, custody.trade_oracle);
+        // also insert into the indexed_custodies map
+        indexed_custodies.write().await.insert(custody_key, custody);
     }
     log::info!(
         "  <> fetched {} oracle price feeds",
-        oracle_price_feeds.len()
+        oracle_price_feed_keys.len()
     );
 
-    Ok(oracle_price_feeds)
+    Ok(oracle_price_feed_keys)
 }
