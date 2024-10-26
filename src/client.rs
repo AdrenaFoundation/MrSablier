@@ -10,17 +10,27 @@ use {
     backoff::{future::retry, ExponentialBackoff},
     clap::Parser,
     futures::{future::TryFutureExt, stream::StreamExt},
+    handlers::{
+        get_median_prioritization_fee_by_percentile, GetRecentPrioritizationFeesByPercentileConfig,
+    },
     pyth::PriceUpdateV2,
-    solana_client::rpc_filter::{Memcmp, RpcFilterType},
+    solana_client::{
+        rpc_client::RpcClient,
+        rpc_filter::{Memcmp, RpcFilterType},
+    },
     solana_sdk::{pubkey::Pubkey, signature::Keypair},
     std::{
         collections::{HashMap, HashSet},
         env,
+        error::Error,
         rc::Rc,
         sync::Arc,
         time::Duration,
     },
-    tokio::sync::{Mutex, RwLock},
+    tokio::{
+        sync::{Mutex, RwLock},
+        time::interval,
+    },
     tonic::transport::channel::ClientTlsConfig,
     utils::OraclePrice,
     yellowstone_grpc_client::{GeyserGrpcClient, Interceptor},
@@ -71,6 +81,7 @@ impl From<ArgsCommitment> for CommitmentLevel {
 const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:10000";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const MEDIAN_PRIORITY_FEE_PERCENTILE: u64 = 30;
 
 #[derive(Debug, Clone, Parser)]
 #[clap(author, version, about)]
@@ -148,6 +159,20 @@ fn create_accounts_filter_map(trade_oracles_keys: Vec<Pubkey>) -> AccountFilterM
     );
 
     accounts_filter_map
+}
+
+async fn fetch_median_priority_fee(
+    program: &anchor_client::Program<Rc<Keypair>>,
+) -> Result<u64, anyhow::Error> {
+    // Change the return type to anyhow::Error
+    let config = GetRecentPrioritizationFeesByPercentileConfig {
+        percentile: Some(MEDIAN_PRIORITY_FEE_PERCENTILE),
+        fallback: false,
+        locked_writable_accounts: vec![adrena_abi::MAIN_POOL_ID, adrena_abi::CORTEX_ID],
+    };
+    get_median_prioritization_fee_by_percentile(&program.async_rpc(), &config, None)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to fetch median priority fee: {:?}", e))
 }
 
 #[tokio::main]
@@ -329,6 +354,13 @@ async fn process_stream_message(
                 );
 
                 if msg.filters.contains(&"price_update_v2".to_owned()) {
+                    let median_priority_fee = fetch_median_priority_fee(&program)
+                        .await
+                        .map_err(|e| backoff::Error::transient(e.into()))?;
+                    log::info!(
+                        "  <> Fetched median priority fee (micro lamports per compute unit): {}",
+                        median_priority_fee
+                    );
                     check_liquidation_sl_tp_conditions(
                         &account_key,
                         &account_data,
@@ -336,6 +368,7 @@ async fn process_stream_message(
                         indexed_custodies,
                         program,
                         cortex,
+                        median_priority_fee,
                     )
                     .await?;
                 }
@@ -379,6 +412,7 @@ pub async fn check_liquidation_sl_tp_conditions(
     indexed_custodies: &IndexedCustodiesThreadSafe,
     program: &anchor_client::Program<Rc<Keypair>>,
     cortex: &Cortex,
+    median_priority_fee: u64,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
     log::debug!("    <> Checking liquidation/sl/tp conditions");
 
@@ -409,6 +443,8 @@ pub async fn check_liquidation_sl_tp_conditions(
         indexed_positions.read().await.iter().filter(|(_, p)| {
             p.custody == associated_custody_key && p.pending_cleanup_and_close == 0
         })
+    // TESTING
+    // .filter(|(key, _)| key.to_string() == "<put your position key here (and set a TP on it)>")
     {
         match position.side {
             1 => {
@@ -423,6 +459,7 @@ pub async fn check_liquidation_sl_tp_conditions(
                         indexed_custodies,
                         program,
                         cortex,
+                        median_priority_fee,
                     )
                     .await?;
                 }
@@ -436,6 +473,7 @@ pub async fn check_liquidation_sl_tp_conditions(
                         indexed_custodies,
                         program,
                         cortex,
+                        median_priority_fee,
                     )
                     .await?;
                 }
@@ -456,6 +494,7 @@ pub async fn check_liquidation_sl_tp_conditions(
                         indexed_custodies,
                         program,
                         cortex,
+                        median_priority_fee,
                     )
                     .await?;
                 }
@@ -469,6 +508,7 @@ pub async fn check_liquidation_sl_tp_conditions(
                         indexed_custodies,
                         program,
                         cortex,
+                        median_priority_fee,
                     )
                     .await?;
                 }

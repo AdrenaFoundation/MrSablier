@@ -1,8 +1,10 @@
 use {
-    crate::{utils, IndexedCustodiesThreadSafe},
+    crate::{
+        handlers::create_ixs::create_close_position_short_ix, utils, IndexedCustodiesThreadSafe,
+    },
     adrena_abi::{
-        main_pool::USDC_CUSTODY_ID, types::Cortex, ADX_MINT, ALP_MINT, SABLIER_THREAD_PROGRAM_ID,
-        SPL_ASSOCIATED_TOKEN_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID, USDC_MINT,
+        main_pool::USDC_CUSTODY_ID, types::Cortex, ADX_MINT, ALP_MINT,
+        SPL_ASSOCIATED_TOKEN_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID,
     },
     solana_client::rpc_config::RpcSendTransactionConfig,
     solana_sdk::{pubkey::Pubkey, signature::Keypair},
@@ -16,6 +18,7 @@ pub async fn sl_short(
     indexed_custodies: &IndexedCustodiesThreadSafe,
     program: &anchor_client::Program<Rc<Keypair>>,
     cortex: &Cortex,
+    median_priority_fee: u64,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
     // check if the price has crossed the SL
     if oracle_price.price >= position.stop_loss_limit_price {
@@ -77,50 +80,27 @@ pub async fn sl_short(
     let lm_staking = adrena_abi::pda::get_staking_pda(&ADX_MINT).0;
     let lp_staking = adrena_abi::pda::get_staking_pda(&ALP_MINT).0;
 
-    let close_position_short_ix = program
-        .request()
-        .args(adrena_abi::instruction::ClosePositionShort {
-            params: adrena_abi::types::ClosePositionShortParams {
-                price: Some(position.stop_loss_close_position_price),
-            },
-        })
-        .accounts(adrena_abi::accounts::ClosePositionShort {
-            caller: program.payer(),
-            owner: position.owner,
-            receiving_account,
-            transfer_authority: transfer_authority_pda,
-            lm_staking,
-            lp_staking,
-            cortex: adrena_abi::pda::get_cortex_pda().0,
-            pool: position.pool,
-            position: *position_key,
-            staking_reward_token_custody: USDC_CUSTODY_ID,
-            staking_reward_token_custody_oracle: staking_reward_token_custody.oracle,
-            staking_reward_token_custody_token_account: staking_reward_token_custody.token_account,
-            custody: position.custody,
-            custody_trade_oracle: custody.trade_oracle,
-            collateral_custody: position.collateral_custody,
-            collateral_custody_oracle: collateral_custody.oracle,
-            collateral_custody_token_account: collateral_custody.token_account,
-            lm_staking_reward_token_vault: adrena_abi::pda::get_staking_reward_token_vault_pda(
-                &lm_staking,
-            )
-            .0,
-            lp_staking_reward_token_vault: adrena_abi::pda::get_staking_reward_token_vault_pda(
-                &lp_staking,
-            )
-            .0,
-            lp_token_mint: ALP_MINT,
-            protocol_fee_recipient: cortex.protocol_fee_recipient,
-            user_profile,
-            take_profit_thread: position_take_profit_pda,
-            stop_loss_thread: position_stop_loss_pda,
-            token_program: SPL_TOKEN_PROGRAM_ID,
-            adrena_program: adrena_abi::ID,
-            sablier_program: SABLIER_THREAD_PROGRAM_ID,
-        });
+    let (close_position_short_ix, close_position_short_accounts) = create_close_position_short_ix(
+        &program.payer(),
+        position_key,
+        position,
+        receiving_account,
+        transfer_authority_pda,
+        lm_staking,
+        lp_staking,
+        cortex,
+        user_profile,
+        position_take_profit_pda,
+        position_stop_loss_pda,
+        staking_reward_token_custody,
+        custody,
+        collateral_custody,
+    );
 
-    let tx = close_position_short_ix
+    let tx = program
+        .request()
+        .args(close_position_short_ix)
+        .accounts(close_position_short_accounts)
         .send_with_spinner_and_config(RpcSendTransactionConfig {
             skip_preflight: true,
             preflight_commitment: None,
@@ -133,13 +113,14 @@ pub async fn sl_short(
             log::error!("Transaction failed with error: {:?}", e);
             backoff::Error::transient(e.into())
         })?;
+
     log::info!(
         " SL Short for position {:#?} - TX sent: {:#?}",
         position_key,
         tx
     );
 
-    // TODO wait for confirmation and retry if needed   
+    // TODO wait for confirmation and retry if needed
 
     Ok(())
 }
