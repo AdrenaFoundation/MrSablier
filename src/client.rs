@@ -63,10 +63,14 @@ impl From<ArgsCommitment> for CommitmentLevel {
     }
 }
 
+const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:10000";
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
 #[derive(Debug, Clone, Parser)]
 #[clap(author, version, about)]
 struct Args {
-    #[clap(short, long, default_value_t = String::from("http://127.0.0.1:10000"))]
+    #[clap(short, long, default_value_t = String::from(DEFAULT_ENDPOINT))]
     /// Service endpoint
     endpoint: String,
 
@@ -90,8 +94,8 @@ impl Args {
     async fn connect(&self) -> anyhow::Result<GeyserGrpcClient<impl Interceptor>> {
         GeyserGrpcClient::build_from_shared(self.endpoint.clone())?
             .x_token(self.x_token.clone())?
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(10))
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(REQUEST_TIMEOUT)
             .tls_config(ClientTlsConfig::new())?
             .connect()
             .await
@@ -485,37 +489,24 @@ pub async fn update_indexed_positions(
     program: &anchor_client::Program<Rc<Keypair>>,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
     if position_account_data.is_empty() {
-        // Position was closed
-        log::info!(
-            "update_indexed_positions: {:#?} was CLOSED",
-            position_account_key
-        );
+        log::info!("Position closed: {:#?}", position_account_key);
         indexed_positions
             .write()
             .await
             .remove(&position_account_key);
     } else {
-        if let Some(_) = indexed_positions.read().await.get(&position_account_key) {
-            // Position was modified
-            log::info!(
-                "update_indexed_positions: {:#?} was MODIFIED",
-                position_account_key
-            );
-        } else {
-            // New position
-            log::info!(
-                "update_indexed_positions: {:#?} was CREATED",
-                position_account_key
-            );
-        }
-        // Either way, update or create, this operation is the same
         let position: adrena_abi::types::Position =
             adrena_abi::types::Position::try_deserialize(&mut &position_account_data[..])
                 .map_err(|e| backoff::Error::transient(e.into()))?;
-        indexed_positions
-            .write()
-            .await
-            .insert(position_account_key.clone(), position);
+
+        let mut positions = indexed_positions.write().await;
+        if positions.contains_key(&position_account_key) {
+            log::info!("Position modified: {:#?}", position_account_key);
+        } else {
+            log::info!("New position created: {:#?}", position_account_key);
+        }
+        // Either way, update or create, this operation is the sames
+        positions.insert(position_account_key.clone(), position);
 
         // If the indexed_custodies map doesn't have the position's custody, add it
         if !indexed_custodies
@@ -523,7 +514,6 @@ pub async fn update_indexed_positions(
             .await
             .contains_key(&position.custody)
         {
-            // Update the indexed custodies map based on the new position
             let custody = program
                 .account::<adrena_abi::types::Custody>(position.custody)
                 .await
