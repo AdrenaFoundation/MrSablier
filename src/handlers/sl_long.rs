@@ -132,7 +132,13 @@ pub async fn sl_long(
             log::error!("Transaction failed with error: {:?}", e);
             backoff::Error::transient(e.into())
         })?;
-    log::info!("Transaction sent: {:#?}", tx);
+    log::info!(
+        " SL Long for position {:#?} - TX sent: {:#?}",
+        position_key,
+        tx
+    );
+
+    // TODO wait for confirmation and retry if needed
 
     Ok(())
 }
