@@ -25,7 +25,7 @@ use {
     yellowstone_grpc_proto::{
         geyser::{
             subscribe_update::UpdateOneof, SubscribeRequest, SubscribeRequestFilterAccountsFilter,
-            SubscribeRequestFilterAccountsFilterMemcmp,
+            SubscribeRequestFilterAccountsFilterMemcmp, SubscribeUpdate,
         },
         prelude::{
             subscribe_request_filter_accounts_filter::Filter as AccountsFilterDataOneof,
@@ -103,7 +103,7 @@ pub fn get_position_anchor_discriminator() -> Vec<u8> {
     utils::derive_discriminator("Position").to_vec()
 }
 
-fn create_accounts_filter_map(price_update_v2_pdas_pubkeys: Vec<String>) -> AccountFilterMap {
+fn create_accounts_filter_map(trade_oracles_keys: Vec<Pubkey>) -> AccountFilterMap {
     let mut accounts_filter_map: AccountFilterMap = HashMap::new();
 
     // Positions
@@ -132,7 +132,7 @@ fn create_accounts_filter_map(price_update_v2_pdas_pubkeys: Vec<String>) -> Acco
     accounts_filter_map.insert(
         "price_update_v2".to_owned(),
         SubscribeRequestFilterAccounts {
-            account: price_update_v2_pdas_pubkeys,
+            account: trade_oracles_keys.iter().map(|p| p.to_string()).collect(),
             owner: price_feed_owner,
             filters: vec![],
         },
@@ -211,7 +211,7 @@ async fn main() -> anyhow::Result<()> {
                 .insert(USDC_CUSTODY_ID, usdc_custody);
 
             // ////////////////////////////////////////////////////////////////
-            log::info!("1 - Retrieving and indexing existing positions...");
+            log::info!("1 - Retrieving and indexing existing positions and their custodies...");
             {
                 let position_pda_filter = RpcFilterType::Memcmp(Memcmp::new_base58_encoded(
                     0,
@@ -230,39 +230,29 @@ async fn main() -> anyhow::Result<()> {
                     "  <> # of existing positions parsed and loaded: {}",
                     indexed_positions.read().await.len()
                 );
+
+                // Update the indexed custodies map based on the indexed positions
+                update_indexed_custodies(&program, &indexed_positions, &indexed_custodies).await?;
             }
             // ////////////////////////////////////////////////////////////////
 
             // ////////////////////////////////////////////////////////////////
-            let price_update_v2_pdas = {
-                log::info!(
-                    "1.2 - Parsing existing positions to retrieve their associated price feeds..."
-                );
-                let price_update_v2_pdas = get_associated_price_update_v2_keys(
-                    &program,
-                    &indexed_positions,
-                    &indexed_custodies,
-                )
-                .await?;
-                log::info!(
-                    "  <> # of price update v2 pdas fetched: {}",
-                    price_update_v2_pdas.len()
-                );
-                price_update_v2_pdas
-            };
-            // ////////////////////////////////////////////////////////////////
-
-            // ////////////////////////////////////////////////////////////////
             // The account filter map is what is provided to the subscription request
-            // to inform the server about the accounts we are interested in observing changes to
+            // to inform the server about the accounts we are interested in observing changes  to
             // ////////////////////////////////////////////////////////////////
             log::info!("2 - Initializing account filter map for...");
             let accounts_filter_map = {
-                let price_update_v2_pdas_pubkeys = price_update_v2_pdas
-                    .iter()
-                    .map(|p| p.1.to_string())
+                // Retrieve the price update v2 pdas from the indexed custodies
+                // They'll be monitored for updates
+                let trade_oracle_keys: Vec<Pubkey> = indexed_custodies
+                    .read()
+                    .await
+                    .values()
+                    .map(|c| c.trade_oracle)
                     .collect();
-                create_accounts_filter_map(price_update_v2_pdas_pubkeys)
+
+                // Create the accounts filter map (on all positions based on discriminator, and the above price update v2 pdas)
+                create_accounts_filter_map(trade_oracle_keys)
             };
             // ////////////////////////////////////////////////////////////////
 
@@ -292,61 +282,14 @@ async fn main() -> anyhow::Result<()> {
             // if coming from the position accounts, we update the indexed positions map
             // ////////////////////////////////////////////////////////////////
             while let Some(message) = stream.next().await {
-                match message {
-                    Ok(msg) => {
-                        match msg.update_oneof {
-                            Some(UpdateOneof::Account(sua)) => {
-                                let account = sua.account.expect("Account should be defined");
-                                let account_key =
-                                    Pubkey::try_from(account.pubkey).expect("valid pubkey");
-                                let account_data = account.data.to_vec();
-
-                                log::info!(
-                                    "new account update: filters {:?}, account: {:#?}",
-                                    msg.filters,
-                                    account_key
-                                );
-
-                                if msg.filters.contains(&"price_update_v2".to_owned()) {
-                                    // Check liquidation/sl/tp conditions for related positions
-                                    check_liquidation_sl_tp_conditions(
-                                        &account_key,
-                                        &account_data,
-                                        &indexed_positions,
-                                        &indexed_custodies,
-                                        &price_update_v2_pdas,
-                                        &program,
-                                        &cortex,
-                                    )
-                                    .await?;
-                                }
-
-                                if msg.filters.contains(&"position".to_owned()) {
-                                    // Update, Create or Delete indexed positions based on the account received
-                                    update_indexed_positions(
-                                        &account_key,
-                                        &account_data,
-                                        &indexed_positions,
-                                        &indexed_custodies,
-                                        &program,
-                                    )
-                                    .await?;
-
-                                    // refresh the PRICE FEEDS subscriptions if a position was modified (make sure all custodies price feeds are being observed)
-                                    // TODO: implement this
-                                }
-
-                                continue;
-                            }
-                            _ => {}
-                        }
-                        log::debug!("new message: {msg:?}")
-                    }
-                    Err(error) => {
-                        log::error!("error: {error:?}");
-                        break;
-                    }
-                }
+                process_stream_message(
+                    message.map_err(|e| backoff::Error::transient(e.into())),
+                    &indexed_positions,
+                    &indexed_custodies,
+                    &program,
+                    &cortex,
+                )
+                .await?;
             }
 
             log::info!("  <> stream closed");
@@ -359,108 +302,170 @@ async fn main() -> anyhow::Result<()> {
     .map_err(Into::into)
 }
 
+async fn process_stream_message(
+    message: Result<SubscribeUpdate, backoff::Error<anyhow::Error>>,
+    indexed_positions: &Arc<RwLock<HashMap<Pubkey, adrena_abi::types::Position>>>,
+    indexed_custodies: &Arc<RwLock<HashMap<Pubkey, adrena_abi::types::Custody>>>,
+    program: &anchor_client::Program<Rc<Keypair>>,
+    cortex: &Cortex,
+) -> Result<(), backoff::Error<anyhow::Error>> {
+    match message {
+        Ok(msg) => {
+            if let Some(UpdateOneof::Account(sua)) = msg.update_oneof {
+                let account = sua.account.expect("Account should be defined");
+                let account_key = Pubkey::try_from(account.pubkey).expect("valid pubkey");
+                let account_data = account.data.to_vec();
+
+                log::info!(
+                    "new account update: filters {:?}, account: {:#?}",
+                    msg.filters,
+                    account_key
+                );
+
+                if msg.filters.contains(&"price_update_v2".to_owned()) {
+                    check_liquidation_sl_tp_conditions(
+                        &account_key,
+                        &account_data,
+                        indexed_positions,
+                        indexed_custodies,
+                        program,
+                        cortex,
+                    )
+                    .await?;
+                }
+
+                if msg.filters.contains(&"position".to_owned()) {
+                    // Also updates the indexed custodies map based on the new position
+                    update_indexed_positions(
+                        &account_key,
+                        &account_data,
+                        indexed_positions,
+                        indexed_custodies,
+                        program,
+                    )
+                    .await?;
+                }
+            }
+            // log::debug!("new message: {msg:?}")
+        }
+        Err(error) => {
+            log::error!("error: {error:?}");
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
 // Check liquidation/sl/tp conditions for related positions
 // Based on the provided price_update_v2 account, check if any of the related positions have crossed their liquidation/sl/tp conditions
 // First go over the price update v2 account to get the price, then go over the indexed positions to check if any of them have crossed their conditions
 pub async fn check_liquidation_sl_tp_conditions(
-    price_update_v2_key: &Pubkey,
-    price_update_v2_data: &[u8],
+    trade_oracle_key: &Pubkey,
+    trade_oracle_data: &[u8],
     indexed_positions: &Arc<RwLock<HashMap<Pubkey, adrena_abi::types::Position>>>,
     indexed_custodies: &Arc<RwLock<HashMap<Pubkey, adrena_abi::types::Custody>>>,
-    price_update_v2_pdas: &HashMap<Pubkey, Pubkey>,
     program: &anchor_client::Program<Rc<Keypair>>,
     cortex: &Cortex,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
     log::debug!("    <> Checking liquidation/sl/tp conditions");
 
     // Deserialize price update v2 account
-    let price_update_v2: pyth::price_update_v2::PriceUpdateV2 =
-        borsh::BorshDeserialize::deserialize(&mut &price_update_v2_data[8..])
+    let trade_oracle: pyth::price_update_v2::PriceUpdateV2 =
+        borsh::BorshDeserialize::deserialize(&mut &trade_oracle_data[8..])
             .map_err(|e| backoff::Error::transient(e.into()))?;
     log::debug!("    <> Deserialized price_update_v2");
 
     // TODO: Optimize this by not creating the OraclePrice struct from the price update v2 account but just using the price and conf directly
     // Create an OraclePrice struct from the price update v2 account
     let oracle_price: utils::oracle_price::OraclePrice =
-        utils::oracle_price::OraclePrice::new_from_pyth_price_update_v2(&price_update_v2)
+        utils::oracle_price::OraclePrice::new_from_pyth_price_update_v2(&trade_oracle)
             .map_err(|e| backoff::Error::transient(e.into()))?;
     log::debug!("    <> Created OraclePrice struct from price_update_v2");
 
-    // check SL/TP/LIQ conditions for all indexed positions
-    for (position_key, position) in indexed_positions.read().await.iter() {
-        let position_custody = position.custody;
+    // Find the custody key associated with the trade oracle key
+    let associated_custody_key = indexed_custodies
+        .read()
+        .await
+        .iter()
+        .find(|(_, c)| c.trade_oracle == *trade_oracle_key)
+        .map(|(k, _)| k.clone())
+        .ok_or(anyhow::anyhow!("No custody found for trade oracle key"))?;
 
-        // Check if the price update v2 account is associated with the position's custody
-        if price_update_v2_pdas.get(&position_custody) == Some(&price_update_v2_key) {
-            match position.side {
-                1 => {
-                    /* LONG */
+    // check SL/TP/LIQ conditions for all indexed positions associated with the associated_custody_key
+    for (position_key, position) in indexed_positions
+        .read()
+        .await
+        .iter()
+        .filter(|(_, p)| p.custody == associated_custody_key)
+    {
+        match position.side {
+            1 => {
+                /* LONG */
 
-                    // Check SL
-                    if position.stop_loss_thread_is_set != 0 {
-                        handlers::sl_long::sl_long(
-                            position_key,
-                            position,
-                            &oracle_price,
-                            indexed_custodies,
-                            program,
-                            cortex,
-                        )
-                        .await?;
-                    }
-
-                    // Check TP
-                    if position.take_profit_thread_is_set != 0 {
-                        handlers::tp_long::tp_long(
-                            position_key,
-                            position,
-                            &oracle_price,
-                            indexed_custodies,
-                            program,
-                            cortex,
-                        )
-                        .await?;
-                    }
-
-                    // Check LIQ
-                    // TODO : recalculate the liquidation price and check if the price has crossed it
-                    // log::warn!("TODO: check LIQ");
+                // Check SL
+                if position.stop_loss_thread_is_set != 0 {
+                    handlers::sl_long::sl_long(
+                        position_key,
+                        position,
+                        &oracle_price,
+                        indexed_custodies,
+                        program,
+                        cortex,
+                    )
+                    .await?;
                 }
-                0 => {
-                    /* SHORT */
 
-                    // Check SL
-                    if position.stop_loss_thread_is_set != 0 {
-                        handlers::sl_short::sl_short(
-                            position_key,
-                            position,
-                            &oracle_price,
-                            indexed_custodies,
-                            program,
-                            cortex,
-                        )
-                        .await?;
-                    }
-
-                    // Check TP
-                    if position.take_profit_thread_is_set != 0 {
-                        handlers::tp_short::tp_short(
-                            position_key,
-                            position,
-                            &oracle_price,
-                            indexed_custodies,
-                            program,
-                            cortex,
-                        )
-                        .await?;
-                    }
-
-                    // Check LIQ
-                    // TODO : recalculate the liquidation price and check if the price has crossed it
-                    // log::warn!("TODO: check LIQ");
+                // Check TP
+                if position.take_profit_thread_is_set != 0 {
+                    handlers::tp_long::tp_long(
+                        position_key,
+                        position,
+                        &oracle_price,
+                        indexed_custodies,
+                        program,
+                        cortex,
+                    )
+                    .await?;
                 }
-                _ => {}
+
+                // Check LIQ
+                // TODO : recalculate the liquidation price and check if the price has crossed it
+                // log::warn!("TODO: check LIQ");
             }
+            0 => {
+                /* SHORT */
+
+                // Check SL
+                if position.stop_loss_thread_is_set != 0 {
+                    handlers::sl_short::sl_short(
+                        position_key,
+                        position,
+                        &oracle_price,
+                        indexed_custodies,
+                        program,
+                        cortex,
+                    )
+                    .await?;
+                }
+
+                // Check TP
+                if position.take_profit_thread_is_set != 0 {
+                    handlers::tp_short::tp_short(
+                        position_key,
+                        position,
+                        &oracle_price,
+                        indexed_custodies,
+                        program,
+                        cortex,
+                    )
+                    .await?;
+                }
+
+                // Check LIQ
+                // TODO : recalculate the liquidation price and check if the price has crossed it
+                // log::warn!("TODO: check LIQ");
+            }
+            _ => {}
         }
     }
     Ok(())
@@ -518,6 +523,7 @@ pub async fn update_indexed_positions(
             .await
             .contains_key(&position.custody)
         {
+            // Update the indexed custodies map based on the new position
             let custody = program
                 .account::<adrena_abi::types::Custody>(position.custody)
                 .await
@@ -531,44 +537,31 @@ pub async fn update_indexed_positions(
     Ok(())
 }
 
-// Provided an array of existing positions pdas, get the associated price update v2 pdas indexed by custody
-async fn get_associated_price_update_v2_keys(
+// Update the indexed custodies map based on the indexed positions
+async fn update_indexed_custodies(
     program: &anchor_client::Program<Rc<Keypair>>,
     indexed_positions: &Arc<RwLock<HashMap<Pubkey, adrena_abi::types::Position>>>,
     indexed_custodies: &Arc<RwLock<HashMap<Pubkey, adrena_abi::types::Custody>>>,
-) -> Result<HashMap<Pubkey, Pubkey>, backoff::Error<anyhow::Error>> {
-    let mut custody_keys: HashSet<Pubkey> = HashSet::new();
+) -> Result<(), backoff::Error<anyhow::Error>> {
+    let custody_keys: HashSet<_> = indexed_positions
+        .read()
+        .await
+        .values()
+        .map(|p| p.custody)
+        .collect();
 
-    for (_, p) in indexed_positions.read().await.iter() {
-        custody_keys.insert(p.custody);
-    }
     log::info!(
         "  <> Existing positions have {} unique custodies",
         custody_keys.len()
     );
-
-    // If there are no custodies, return an empty set
-    if custody_keys.is_empty() {
-        return Ok(HashMap::new());
-    }
-
-    let mut oracle_price_feed_keys: HashMap<Pubkey, Pubkey> = HashMap::new();
 
     for custody_key in custody_keys {
         let custody = program
             .account::<adrena_abi::types::Custody>(custody_key)
             .await
             .map_err(|e| backoff::Error::transient(e.into()))?;
-
-        // insert into the oracle_price_feeds map
-        oracle_price_feed_keys.insert(custody_key, custody.trade_oracle);
-        // also insert into the indexed_custodies map
         indexed_custodies.write().await.insert(custody_key, custody);
     }
-    log::info!(
-        "  <> fetched {} oracle price feeds",
-        oracle_price_feed_keys.len()
-    );
 
-    Ok(oracle_price_feed_keys)
+    Ok(())
 }
