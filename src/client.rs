@@ -10,6 +10,7 @@ use {
     backoff::{future::retry, ExponentialBackoff},
     clap::Parser,
     futures::{future::TryFutureExt, stream::StreamExt},
+    pyth::PriceUpdateV2,
     solana_client::rpc_filter::{Memcmp, RpcFilterType},
     solana_sdk::{pubkey::Pubkey, signature::Keypair},
     std::{
@@ -21,6 +22,7 @@ use {
     },
     tokio::sync::{Mutex, RwLock},
     tonic::transport::channel::ClientTlsConfig,
+    utils::OraclePrice,
     yellowstone_grpc_client::{GeyserGrpcClient, Interceptor},
     yellowstone_grpc_proto::{
         geyser::{
@@ -36,6 +38,9 @@ use {
 };
 
 type AccountFilterMap = HashMap<String, SubscribeRequestFilterAccounts>;
+
+type IndexedPositionsThreadSafe = Arc<RwLock<HashMap<Pubkey, adrena_abi::types::Position>>>;
+type IndexedCustodiesThreadSafe = Arc<RwLock<HashMap<Pubkey, adrena_abi::types::Custody>>>;
 
 // pub const PYTH_ORACLE_PROGRAM: &str = "FsJ3A3u2vn5cTVofAjvy6y5kwABJAqYWpe4975bi2epH";
 // https://solscan.io/account/rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ
@@ -157,11 +162,9 @@ async fn main() -> anyhow::Result<()> {
     let zero_attempts = Arc::new(Mutex::new(true));
 
     // The array of indexed positions - These positions are the ones that we are watching for any updates from the stream and for SL/TP/LIQ conditions
-    let indexed_positions: Arc<RwLock<HashMap<Pubkey, adrena_abi::types::Position>>> =
-        Arc::new(RwLock::new(HashMap::new()));
+    let indexed_positions: IndexedPositionsThreadSafe = Arc::new(RwLock::new(HashMap::new()));
     // The array of indexed custodies - These are not directly observed, but are needed for instructions and to keep track of which price update v2 accounts are observed
-    let indexed_custodies: Arc<RwLock<HashMap<Pubkey, adrena_abi::types::Custody>>> =
-        Arc::new(RwLock::new(HashMap::new()));
+    let indexed_custodies: IndexedCustodiesThreadSafe = Arc::new(RwLock::new(HashMap::new()));
 
     // The default exponential backoff strategy intervals:
     // [500ms, 750ms, 1.125s, 1.6875s, 2.53125s, 3.796875s, 5.6953125s,
@@ -186,7 +189,6 @@ async fn main() -> anyhow::Result<()> {
                 .connect()
                 .await
                 .map_err(|e| backoff::Error::transient(e.into()))?;
-            // let rpc = RpcClient::new(args.endpoint.clone());
 
             let payer = read_keypair_file(args.payer_keypair.clone()).unwrap();
             let client = Client::new(
@@ -308,8 +310,8 @@ async fn main() -> anyhow::Result<()> {
 
 async fn process_stream_message(
     message: Result<SubscribeUpdate, backoff::Error<anyhow::Error>>,
-    indexed_positions: &Arc<RwLock<HashMap<Pubkey, adrena_abi::types::Position>>>,
-    indexed_custodies: &Arc<RwLock<HashMap<Pubkey, adrena_abi::types::Custody>>>,
+    indexed_positions: &IndexedPositionsThreadSafe,
+    indexed_custodies: &IndexedCustodiesThreadSafe,
     program: &anchor_client::Program<Rc<Keypair>>,
     cortex: &Cortex,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
@@ -339,6 +341,7 @@ async fn process_stream_message(
                 }
 
                 if msg.filters.contains(&"position".to_owned()) {
+                    let indexed_custodies_count_before = indexed_custodies.read().await.len();
                     // Also updates the indexed custodies map based on the new position
                     update_indexed_positions(
                         &account_key,
@@ -348,6 +351,12 @@ async fn process_stream_message(
                         program,
                     )
                     .await?;
+                    let indexed_custodies_count_after = indexed_custodies.read().await.len();
+
+                    // if the indexed custodies map has a new custody, update the subscription request
+                    if indexed_custodies_count_after > indexed_custodies_count_before {
+                        // TODO: update the subscription request
+                    }
                 }
             }
             // log::debug!("new message: {msg:?}")
@@ -366,24 +375,23 @@ async fn process_stream_message(
 pub async fn check_liquidation_sl_tp_conditions(
     trade_oracle_key: &Pubkey,
     trade_oracle_data: &[u8],
-    indexed_positions: &Arc<RwLock<HashMap<Pubkey, adrena_abi::types::Position>>>,
-    indexed_custodies: &Arc<RwLock<HashMap<Pubkey, adrena_abi::types::Custody>>>,
+    indexed_positions: &IndexedPositionsThreadSafe,
+    indexed_custodies: &IndexedCustodiesThreadSafe,
     program: &anchor_client::Program<Rc<Keypair>>,
     cortex: &Cortex,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
     log::debug!("    <> Checking liquidation/sl/tp conditions");
 
     // Deserialize price update v2 account
-    let trade_oracle: pyth::price_update_v2::PriceUpdateV2 =
+    let trade_oracle: PriceUpdateV2 =
         borsh::BorshDeserialize::deserialize(&mut &trade_oracle_data[8..])
             .map_err(|e| backoff::Error::transient(e.into()))?;
     log::debug!("    <> Deserialized price_update_v2");
 
     // TODO: Optimize this by not creating the OraclePrice struct from the price update v2 account but just using the price and conf directly
     // Create an OraclePrice struct from the price update v2 account
-    let oracle_price: utils::oracle_price::OraclePrice =
-        utils::oracle_price::OraclePrice::new_from_pyth_price_update_v2(&trade_oracle)
-            .map_err(|e| backoff::Error::transient(e.into()))?;
+    let oracle_price: OraclePrice = OraclePrice::new_from_pyth_price_update_v2(&trade_oracle)
+        .map_err(|e| backoff::Error::transient(e.into()))?;
     log::debug!("    <> Created OraclePrice struct from price_update_v2");
 
     // Find the custody key associated with the trade oracle key
@@ -484,8 +492,8 @@ pub async fn check_liquidation_sl_tp_conditions(
 pub async fn update_indexed_positions(
     position_account_key: &Pubkey,
     position_account_data: &[u8],
-    indexed_positions: &Arc<RwLock<HashMap<Pubkey, adrena_abi::types::Position>>>,
-    indexed_custodies: &Arc<RwLock<HashMap<Pubkey, adrena_abi::types::Custody>>>,
+    indexed_positions: &IndexedPositionsThreadSafe,
+    indexed_custodies: &IndexedCustodiesThreadSafe,
     program: &anchor_client::Program<Rc<Keypair>>,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
     if position_account_data.is_empty() {
