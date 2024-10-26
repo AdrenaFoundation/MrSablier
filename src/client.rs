@@ -331,6 +331,9 @@ async fn main() -> anyhow::Result<()> {
                                         &program,
                                     )
                                     .await?;
+
+                                    // refresh the PRICE FEEDS subscriptions if a position was modified (make sure all custodies price feeds are being observed)
+                                    // TODO: implement this
                                 }
 
                                 continue;
