@@ -27,7 +27,6 @@ pub async fn get_recent_prioritization_fees_by_percentile(
         args.push(serde_json::to_value(vec![percentile])?);
     }
 
-    log::info!("  <> args: {:?}", args);
     let response: Vec<RpcPrioritizationFee> = client
         .send(
             solana_client::rpc_request::RpcRequest::GetRecentPrioritizationFees,

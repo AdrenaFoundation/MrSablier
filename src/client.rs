@@ -59,6 +59,14 @@ pub mod handlers;
 pub mod pyth;
 pub mod utils;
 
+const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:10000";
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const MEAN_PRIORITY_FEE_PERCENTILE: u64 = 3000; // 30th
+const PRIORITY_FEE_REFRESH_INTERVAL: u64 = 5; // seconds
+pub const CLOSE_POSITION_LONG_CU_LIMIT: u32 = 300_000;
+pub const CLOSE_POSITION_SHORT_CU_LIMIT: u32 = 200_000;
+
 #[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
 enum ArgsCommitment {
     #[default]
@@ -77,11 +85,6 @@ impl From<ArgsCommitment> for CommitmentLevel {
     }
 }
 
-const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:10000";
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-const MEAN_PRIORITY_FEE_PERCENTILE: u64 = 3000; // 30th
-const PRIORITY_FEE_REFRESH_INTERVAL: u64 = 5; // seconds
 
 #[derive(Debug, Clone, Parser)]
 #[clap(author, version, about)]
@@ -139,7 +142,7 @@ fn create_accounts_filter_map(trade_oracles_keys: Vec<Pubkey>) -> AccountFilterM
     };
     let position_owner = vec![adrena_abi::ID.to_string()];
     accounts_filter_map.insert(
-        "position".to_owned(),
+        "positions".to_owned(),
         SubscribeRequestFilterAccounts {
             account: vec![],
             owner: position_owner,
@@ -150,7 +153,7 @@ fn create_accounts_filter_map(trade_oracles_keys: Vec<Pubkey>) -> AccountFilterM
     // Price update v2 pdas
     let price_feed_owner = vec![PYTH_RECEIVER_PROGRAM.to_owned()];
     accounts_filter_map.insert(
-        "price_update_v2".to_owned(),
+        "price_feeds".to_owned(),
         SubscribeRequestFilterAccounts {
             account: trade_oracles_keys.iter().map(|p| p.to_string()).collect(),
             owner: price_feed_owner,
@@ -379,13 +382,7 @@ async fn process_stream_message(
                 let account_key = Pubkey::try_from(account.pubkey).expect("valid pubkey");
                 let account_data = account.data.to_vec();
 
-                log::info!(
-                    "new account update: filters {:?}, account: {:#?}",
-                    msg.filters,
-                    account_key
-                );
-
-                if msg.filters.contains(&"price_update_v2".to_owned()) {
+                if msg.filters.contains(&"price_feeds".to_owned()) {
                     check_liquidation_sl_tp_conditions(
                         &account_key,
                         &account_data,
@@ -398,7 +395,7 @@ async fn process_stream_message(
                     .await?;
                 }
 
-                if msg.filters.contains(&"position".to_owned()) {
+                if msg.filters.contains(&"positions".to_owned()) {
                     let indexed_custodies_count_before = indexed_custodies.read().await.len();
                     // Also updates the indexed custodies map based on the new position
                     update_indexed_positions(
@@ -462,14 +459,13 @@ pub async fn check_liquidation_sl_tp_conditions(
         .map(|(k, _)| k.clone())
         .ok_or(anyhow::anyhow!("No custody found for trade oracle key"))?;
 
+    log::info!("    <> Pricefeed {:#?} update (price: {})", associated_custody_key, oracle_price.price);
     // check SL/TP/LIQ conditions for all indexed positions associated with the associated_custody_key
     // and that are not pending cleanup and close (just in case the position was partially handled by sablier)
     for (position_key, position) in
         indexed_positions.read().await.iter().filter(|(_, p)| {
             p.custody == associated_custody_key && p.pending_cleanup_and_close == 0
         })
-    // TESTING
-    // .filter(|(key, _)| key.to_string() == "<put your position key here (and set a TP on it)>")
     {
         match position.side {
             1 => {

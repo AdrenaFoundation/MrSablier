@@ -1,11 +1,14 @@
 use {
-    crate::{handlers::create_close_position_long_ix, utils, IndexedCustodiesThreadSafe},
+    crate::{
+        handlers::create_close_position_long_ix, utils, IndexedCustodiesThreadSafe,
+        CLOSE_POSITION_LONG_CU_LIMIT,
+    },
     adrena_abi::{
         main_pool::USDC_CUSTODY_ID, types::Cortex, ADX_MINT, ALP_MINT,
         SPL_ASSOCIATED_TOKEN_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID,
     },
     solana_client::rpc_config::RpcSendTransactionConfig,
-    solana_sdk::{pubkey::Pubkey, signature::Keypair},
+    solana_sdk::{compute_budget::ComputeBudgetInstruction, pubkey::Pubkey, signature::Keypair},
     std::sync::Arc,
 };
 
@@ -94,24 +97,14 @@ pub async fn sl_long(
         custody,
     );
 
-    // let instruction = Instruction {
-    //     program_id: close_position_long_accounts.adrena_program,
-    //     accounts: close_position_long_accounts.,
-    //     data: close_position_long_params.to_vec(),
-    // };
-    // let transaction = Transaction::new_signed_with_payer(
-    //     &[close_position_long_params],
-    //     Some(&program.payer()),
-    //     &[&program.payer()],
-    //     &[],
-    // );
-    // let simulation_result = program
-    //     .async_rpc()
-    //     .simulate_transaction(&close_position_long_params, &close_position_long_accounts)
-    //     .await?;
-
     let tx = program
         .request()
+        .instruction(ComputeBudgetInstruction::set_compute_unit_price(
+            median_priority_fee,
+        ))
+        .instruction(ComputeBudgetInstruction::set_compute_unit_limit(
+            CLOSE_POSITION_LONG_CU_LIMIT,
+        ))
         .args(close_position_long_params)
         .accounts(close_position_long_accounts)
         .send_with_spinner_and_config(RpcSendTransactionConfig {
