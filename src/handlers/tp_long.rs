@@ -1,5 +1,8 @@
 use {
-    crate::{handlers::create_close_position_long_ix, utils, IndexedCustodiesThreadSafe, CLOSE_POSITION_LONG_CU_LIMIT},
+    crate::{
+        handlers::create_close_position_long_ix, utils, IndexedCustodiesThreadSafe,
+        CLOSE_POSITION_LONG_CU_LIMIT,
+    },
     adrena_abi::{
         main_pool::USDC_CUSTODY_ID, types::Cortex, ADX_MINT, ALP_MINT,
         SPL_ASSOCIATED_TOKEN_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID,
@@ -104,13 +107,14 @@ pub async fn tp_long(
         ))
         .args(close_position_long_ix)
         .accounts(close_position_long_accounts)
-        .send_with_spinner_and_config(RpcSendTransactionConfig {
-            skip_preflight: true,
-            preflight_commitment: None,
-            encoding: None,
-            max_retries: None,
-            min_context_slot: None,
-        })
+        .send()
+        // .send_with_spinner_and_config(RpcSendTransactionConfig {
+        //     skip_preflight: true,
+        //     preflight_commitment: None,
+        //     encoding: None,
+        //     max_retries: None,
+        //     min_context_slot: None,
+        // })
         .await
         .map_err(|e| {
             log::error!("Transaction failed with error: {:?}", e);

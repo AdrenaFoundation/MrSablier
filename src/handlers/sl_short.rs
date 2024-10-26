@@ -108,13 +108,14 @@ pub async fn sl_short(
         ))
         .args(close_position_short_ix)
         .accounts(close_position_short_accounts)
-        .send_with_spinner_and_config(RpcSendTransactionConfig {
-            skip_preflight: true,
-            preflight_commitment: None,
-            encoding: None,
-            max_retries: None,
-            min_context_slot: None,
-        })
+        .send()
+        // .send_with_spinner_and_config(RpcSendTransactionConfig {
+        //     skip_preflight: true,
+        //     preflight_commitment: None,
+        //     encoding: None,
+        //     max_retries: None,
+        //     min_context_slot: None,
+        // })
         .await
         .map_err(|e| {
             log::error!("Transaction failed with error: {:?}", e);

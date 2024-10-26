@@ -63,9 +63,9 @@ const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:10000";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const MEAN_PRIORITY_FEE_PERCENTILE: u64 = 3000; // 30th
-const PRIORITY_FEE_REFRESH_INTERVAL: u64 = 5; // seconds
-pub const CLOSE_POSITION_LONG_CU_LIMIT: u32 = 300_000;
-pub const CLOSE_POSITION_SHORT_CU_LIMIT: u32 = 200_000;
+const PRIORITY_FEE_REFRESH_INTERVAL: Duration = Duration::from_secs(5); // seconds
+pub const CLOSE_POSITION_LONG_CU_LIMIT: u32 = 380_000;
+pub const CLOSE_POSITION_SHORT_CU_LIMIT: u32 = 250_000;
 
 #[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
 enum ArgsCommitment {
@@ -316,7 +316,7 @@ async fn main() -> anyhow::Result<()> {
             let _fee_task = {
                 let median_priority_fee = Arc::clone(&median_priority_fee);
                 tokio::spawn(async move {
-                    let mut fee_refresh_interval = interval(Duration::from_secs(PRIORITY_FEE_REFRESH_INTERVAL));
+                    let mut fee_refresh_interval = interval(PRIORITY_FEE_REFRESH_INTERVAL);
                     loop {
                         fee_refresh_interval.tick().await;
                         if let Ok(fee) = fetch_priority_fee(&rpc_client).await {
@@ -341,7 +341,7 @@ async fn main() -> anyhow::Result<()> {
             // ////////////////////////////////////////////////////////////////
             loop {
                 if let Some(message) = stream.next().await {
-                    process_stream_message(
+                    match process_stream_message(
                         message.map_err(|e| backoff::Error::transient(e.into())),
                         &indexed_positions,
                         &indexed_custodies,
@@ -349,7 +349,18 @@ async fn main() -> anyhow::Result<()> {
                         &cortex,
                         *median_priority_fee.lock().await,
                     )
-                    .await?;
+                    .await
+                    {
+                        Ok(_) => continue,
+                        Err(backoff::Error::Permanent(e)) => {
+                            log::error!("Permanent error: {:?}", e);
+                            break; // or handle differently
+                        }
+                        Err(backoff::Error::Transient { err, .. }) => {
+                            log::warn!("Transient error: {:?}", err);
+                            // Handle transient error without breaking the loop
+                        }
+                    }
                 }
             }
 
@@ -624,3 +635,4 @@ async fn update_indexed_custodies(
 
     Ok(())
 }
+
