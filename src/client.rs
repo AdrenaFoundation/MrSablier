@@ -11,7 +11,7 @@ use {
     clap::Parser,
     futures::{future::TryFutureExt, stream::StreamExt},
     handlers::{
-        get_median_prioritization_fee_by_percentile, GetRecentPrioritizationFeesByPercentileConfig,
+        get_mean_prioritization_fee_by_percentile, GetRecentPrioritizationFeesByPercentileConfig,
     },
     pyth::PriceUpdateV2,
     solana_client::{
@@ -80,7 +80,7 @@ impl From<ArgsCommitment> for CommitmentLevel {
 const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:10000";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-const MEDIAN_PRIORITY_FEE_PERCENTILE: u64 = 3000; // 30th
+const MEAN_PRIORITY_FEE_PERCENTILE: u64 = 3000; // 30th
 const PRIORITY_FEE_REFRESH_INTERVAL: u64 = 5; // seconds
 
 #[derive(Debug, Clone, Parser)]
@@ -161,16 +161,16 @@ fn create_accounts_filter_map(trade_oracles_keys: Vec<Pubkey>) -> AccountFilterM
     accounts_filter_map
 }
 
-async fn fetch_median_priority_fee(client: &RpcClient) -> Result<u64, anyhow::Error> {
+async fn fetch_priority_fee(client: &RpcClient) -> Result<u64, anyhow::Error> {
     // Change the return type to anyhow::Error
     let config = GetRecentPrioritizationFeesByPercentileConfig {
-        percentile: Some(MEDIAN_PRIORITY_FEE_PERCENTILE),
+        percentile: Some(MEAN_PRIORITY_FEE_PERCENTILE),
         fallback: false,
         locked_writable_accounts: vec![], //adrena_abi::MAIN_POOL_ID, adrena_abi::CORTEX_ID],
     };
-    get_median_prioritization_fee_by_percentile(client, &config, None)
+    get_mean_prioritization_fee_by_percentile(client, &config, None)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to fetch median priority fee: {:?}", e))
+        .map_err(|e| anyhow::anyhow!("Failed to fetch mean priority fee: {:?}", e))
 }
 
 #[tokio::main]
@@ -316,7 +316,7 @@ async fn main() -> anyhow::Result<()> {
                     let mut fee_refresh_interval = interval(Duration::from_secs(PRIORITY_FEE_REFRESH_INTERVAL));
                     loop {
                         fee_refresh_interval.tick().await;
-                        if let Ok(fee) = fetch_median_priority_fee(&rpc_client).await {
+                        if let Ok(fee) = fetch_priority_fee(&rpc_client).await {
                             let mut fee_lock = median_priority_fee.lock().await;
                             *fee_lock = fee;
                             log::info!(
@@ -355,6 +355,7 @@ async fn main() -> anyhow::Result<()> {
             // Ensure the fee task is awaited or handled properly
             // fee_task.await.unwrap();
 
+            
             Ok::<(), backoff::Error<anyhow::Error>>(())
         }
         .inspect_err(|error| log::error!("failed to connect: {error}"))

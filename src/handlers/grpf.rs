@@ -46,26 +46,49 @@ pub async fn get_recent_prioritization_fees_by_percentile(
     Ok(recent_prioritization_fees)
 }
 
-pub async fn get_median_prioritization_fee_by_percentile(
+// pub async fn get_median_prioritization_fee_by_percentile(
+//     client: &RpcClient,
+//     config: &GetRecentPrioritizationFeesByPercentileConfig,
+//     slots_to_return: Option<usize>,
+// ) -> Result<u64, Box<dyn Error>> {
+//     let mut recent_prioritization_fees =
+//         get_recent_prioritization_fees_by_percentile(client, config, slots_to_return).await?;
+
+//     recent_prioritization_fees.sort_by_key(|fee| fee.prioritization_fee);
+
+//     let half = recent_prioritization_fees.len() / 2;
+
+//     let median = if recent_prioritization_fees.len() % 2 == 0 {
+//         (recent_prioritization_fees[half - 1].prioritization_fee
+//             + recent_prioritization_fees[half].prioritization_fee
+//             + 1)
+//             / 2
+//     } else {
+//         recent_prioritization_fees[half].prioritization_fee
+//     };
+
+//     Ok(median)
+// }
+
+pub async fn get_mean_prioritization_fee_by_percentile(
     client: &RpcClient,
     config: &GetRecentPrioritizationFeesByPercentileConfig,
     slots_to_return: Option<usize>,
 ) -> Result<u64, Box<dyn Error>> {
-    let mut recent_prioritization_fees =
+    let recent_prioritization_fees =
         get_recent_prioritization_fees_by_percentile(client, config, slots_to_return).await?;
 
-    recent_prioritization_fees.sort_by_key(|fee| fee.prioritization_fee);
+    if recent_prioritization_fees.is_empty() {
+        return Err("No prioritization fees retrieved".into());
+    }
 
-    let half = recent_prioritization_fees.len() / 2;
+    let sum: u64 = recent_prioritization_fees
+        .iter()
+        .map(|fee| fee.prioritization_fee)
+        .sum();
 
-    let median = if recent_prioritization_fees.len() % 2 == 0 {
-        (recent_prioritization_fees[half - 1].prioritization_fee
-            + recent_prioritization_fees[half].prioritization_fee
-            + 1)
-            / 2
-    } else {
-        recent_prioritization_fees[half].prioritization_fee
-    };
+    let mean = (sum + recent_prioritization_fees.len() as u64 - 1)
+        / recent_prioritization_fees.len() as u64;
 
-    Ok(median)
+    Ok(mean)
 }
