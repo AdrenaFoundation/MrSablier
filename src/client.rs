@@ -15,7 +15,7 @@ use {
     },
     pyth::PriceUpdateV2,
     solana_client::{
-        rpc_client::RpcClient,
+        nonblocking::rpc_client::RpcClient,
         rpc_filter::{Memcmp, RpcFilterType},
     },
     solana_sdk::{pubkey::Pubkey, signature::Keypair},
@@ -23,7 +23,6 @@ use {
         collections::{HashMap, HashSet},
         env,
         error::Error,
-        rc::Rc,
         sync::Arc,
         time::Duration,
     },
@@ -81,7 +80,8 @@ impl From<ArgsCommitment> for CommitmentLevel {
 const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:10000";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-const MEDIAN_PRIORITY_FEE_PERCENTILE: u64 = 30;
+const MEDIAN_PRIORITY_FEE_PERCENTILE: u64 = 3000; // 30th
+const PRIORITY_FEE_REFRESH_INTERVAL: u64 = 5; // seconds
 
 #[derive(Debug, Clone, Parser)]
 #[clap(author, version, about)]
@@ -161,16 +161,14 @@ fn create_accounts_filter_map(trade_oracles_keys: Vec<Pubkey>) -> AccountFilterM
     accounts_filter_map
 }
 
-async fn fetch_median_priority_fee(
-    program: &anchor_client::Program<Rc<Keypair>>,
-) -> Result<u64, anyhow::Error> {
+async fn fetch_median_priority_fee(client: &RpcClient) -> Result<u64, anyhow::Error> {
     // Change the return type to anyhow::Error
     let config = GetRecentPrioritizationFeesByPercentileConfig {
         percentile: Some(MEDIAN_PRIORITY_FEE_PERCENTILE),
         fallback: false,
-        locked_writable_accounts: vec![adrena_abi::MAIN_POOL_ID, adrena_abi::CORTEX_ID],
+        locked_writable_accounts: vec![], //adrena_abi::MAIN_POOL_ID, adrena_abi::CORTEX_ID],
     };
-    get_median_prioritization_fee_by_percentile(&program.async_rpc(), &config, None)
+    get_median_prioritization_fee_by_percentile(client, &config, None)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to fetch median priority fee: {:?}", e))
 }
@@ -218,7 +216,7 @@ async fn main() -> anyhow::Result<()> {
             let payer = read_keypair_file(args.payer_keypair.clone()).unwrap();
             let client = Client::new(
                 Cluster::Custom(args.endpoint.clone(), args.endpoint.clone()),
-                Rc::new(payer),
+                Arc::new(payer), // Change Rc to Arc
             );
             let program = client
                 .program(adrena_abi::ID)
@@ -305,25 +303,57 @@ async fn main() -> anyhow::Result<()> {
                 (subscribe_tx, stream)
             };
 
+
+            // ////////////////////////////////////////////////////////////////
+            // Side thread to fetch the median priority fee every 5 seconds
+            // ////////////////////////////////////////////////////////////////
+            let median_priority_fee = Arc::new(Mutex::new(0u64));
+            let rpc_client = program.async_rpc();
+            // Spawn a task to poll priority fees every 5 seconds
+            let _fee_task = {
+                let median_priority_fee = Arc::clone(&median_priority_fee);
+                tokio::spawn(async move {
+                    let mut fee_refresh_interval = interval(Duration::from_secs(PRIORITY_FEE_REFRESH_INTERVAL));
+                    loop {
+                        fee_refresh_interval.tick().await;
+                        if let Ok(fee) = fetch_median_priority_fee(&rpc_client).await {
+                            let mut fee_lock = median_priority_fee.lock().await;
+                            *fee_lock = fee;
+                            log::info!(
+                            "  <> Updated median priority fee 30th percentile to : {} µLamports / cu",
+                            fee
+                        );
+                        }
+                    }
+                })
+            };
+
             // ////////////////////////////////////////////////////////////////
             // CORE LOOP
             //
             // Here we wait for new messages from the stream and process them
-            // if coming from the price update v2 accounts, we check for liquidation/sl/tp conditions on the already indexed positions
-            // if coming from the position accounts, we update the indexed positions map
+            // if coming from the price update v2 accounts, we check for 
+            // liquidation/sl/tp conditions on the already indexed positions if 
+            // coming from the position accounts, we update the indexed positions map
             // ////////////////////////////////////////////////////////////////
-            while let Some(message) = stream.next().await {
-                process_stream_message(
-                    message.map_err(|e| backoff::Error::transient(e.into())),
-                    &indexed_positions,
-                    &indexed_custodies,
-                    &program,
-                    &cortex,
-                )
-                .await?;
+            loop {
+                if let Some(message) = stream.next().await {
+                    process_stream_message(
+                        message.map_err(|e| backoff::Error::transient(e.into())),
+                        &indexed_positions,
+                        &indexed_custodies,
+                        &program,
+                        &cortex,
+                        *median_priority_fee.lock().await,
+                    )
+                    .await?;
+                }
             }
 
-            log::info!("  <> stream closed");
+            // log::info!("  <> stream closed");
+
+            // Ensure the fee task is awaited or handled properly
+            // fee_task.await.unwrap();
 
             Ok::<(), backoff::Error<anyhow::Error>>(())
         }
@@ -337,8 +367,9 @@ async fn process_stream_message(
     message: Result<SubscribeUpdate, backoff::Error<anyhow::Error>>,
     indexed_positions: &IndexedPositionsThreadSafe,
     indexed_custodies: &IndexedCustodiesThreadSafe,
-    program: &anchor_client::Program<Rc<Keypair>>,
+    program: &anchor_client::Program<Arc<Keypair>>,
     cortex: &Cortex,
+    median_priority_fee: u64,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
     match message {
         Ok(msg) => {
@@ -354,13 +385,6 @@ async fn process_stream_message(
                 );
 
                 if msg.filters.contains(&"price_update_v2".to_owned()) {
-                    let median_priority_fee = fetch_median_priority_fee(&program)
-                        .await
-                        .map_err(|e| backoff::Error::transient(e.into()))?;
-                    log::info!(
-                        "  <> Fetched median priority fee (micro lamports per compute unit): {}",
-                        median_priority_fee
-                    );
                     check_liquidation_sl_tp_conditions(
                         &account_key,
                         &account_data,
@@ -410,7 +434,7 @@ pub async fn check_liquidation_sl_tp_conditions(
     trade_oracle_data: &[u8],
     indexed_positions: &IndexedPositionsThreadSafe,
     indexed_custodies: &IndexedCustodiesThreadSafe,
-    program: &anchor_client::Program<Rc<Keypair>>,
+    program: &anchor_client::Program<Arc<Keypair>>,
     cortex: &Cortex,
     median_priority_fee: u64,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
@@ -534,7 +558,7 @@ pub async fn update_indexed_positions(
     position_account_data: &[u8],
     indexed_positions: &IndexedPositionsThreadSafe,
     indexed_custodies: &IndexedCustodiesThreadSafe,
-    program: &anchor_client::Program<Rc<Keypair>>,
+    program: &anchor_client::Program<Arc<Keypair>>,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
     if position_account_data.is_empty() {
         log::info!("Position closed: {:#?}", position_account_key);
@@ -577,7 +601,7 @@ pub async fn update_indexed_positions(
 
 // Update the indexed custodies map based on the indexed positions
 async fn update_indexed_custodies(
-    program: &anchor_client::Program<Rc<Keypair>>,
+    program: &anchor_client::Program<Arc<Keypair>>,
     indexed_positions: &Arc<RwLock<HashMap<Pubkey, adrena_abi::types::Position>>>,
     indexed_custodies: &Arc<RwLock<HashMap<Pubkey, adrena_abi::types::Custody>>>,
 ) -> Result<(), backoff::Error<anyhow::Error>> {

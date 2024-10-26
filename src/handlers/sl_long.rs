@@ -5,10 +5,8 @@ use {
         SPL_ASSOCIATED_TOKEN_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID,
     },
     solana_client::rpc_config::RpcSendTransactionConfig,
-    solana_sdk::{
-        instruction::Instruction, pubkey::Pubkey, signature::Keypair, transaction::Transaction,
-    },
-    std::rc::Rc,
+    solana_sdk::{pubkey::Pubkey, signature::Keypair},
+    std::sync::Arc,
 };
 
 pub async fn sl_long(
@@ -16,7 +14,7 @@ pub async fn sl_long(
     position: &adrena_abi::types::Position,
     oracle_price: &utils::oracle_price::OraclePrice,
     indexed_custodies: &IndexedCustodiesThreadSafe,
-    program: &anchor_client::Program<Rc<Keypair>>,
+    program: &anchor_client::Program<Arc<Keypair>>,
     cortex: &Cortex,
     median_priority_fee: u64,
 ) -> Result<(), backoff::Error<anyhow::Error>> {

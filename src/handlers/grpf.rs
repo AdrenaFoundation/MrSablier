@@ -1,4 +1,5 @@
 use {
+    serde_json,
     solana_client::{nonblocking::rpc_client::RpcClient, rpc_response::RpcPrioritizationFee},
     solana_sdk::pubkey::Pubkey,
     std::error::Error,
@@ -20,12 +21,13 @@ pub async fn get_recent_prioritization_fees_by_percentile(
         .iter()
         .map(|key| key.to_string())
         .collect();
-    let mut args = vec![accounts];
+    let mut args = vec![serde_json::to_value(accounts)?];
 
     if let Some(percentile) = config.percentile {
-        args.push(vec![percentile.to_string()]);
+        args.push(serde_json::to_value(vec![percentile])?);
     }
 
+    log::info!("  <> args: {:?}", args);
     let response: Vec<RpcPrioritizationFee> = client
         .send(
             solana_client::rpc_request::RpcRequest::GetRecentPrioritizationFees,
