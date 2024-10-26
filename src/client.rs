@@ -323,7 +323,7 @@ async fn main() -> anyhow::Result<()> {
                         if let Ok(fee) = fetch_priority_fee(&client).await {
                             let mut fee_lock = median_priority_fee.lock().await;
                             *fee_lock = fee;
-                            log::info!(
+                            log::debug!(
                             "  <> Updated median priority fee 30th percentile to : {} µLamports / cu",
                             fee
                         );
@@ -473,19 +473,15 @@ pub async fn check_liquidation_sl_tp_conditions(
     cortex: &Cortex,
     median_priority_fee: u64,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
-    log::debug!("    <> Checking liquidation/sl/tp conditions");
-
     // Deserialize price update v2 account
     let trade_oracle: PriceUpdateV2 =
         borsh::BorshDeserialize::deserialize(&mut &trade_oracle_data[8..])
             .map_err(|e| backoff::Error::transient(e.into()))?;
-    log::debug!("    <> Deserialized price_update_v2");
 
     // TODO: Optimize this by not creating the OraclePrice struct from the price update v2 account but just using the price and conf directly
     // Create an OraclePrice struct from the price update v2 account
     let oracle_price: OraclePrice = OraclePrice::new_from_pyth_price_update_v2(&trade_oracle)
         .map_err(|e| backoff::Error::transient(e.into()))?;
-    log::debug!("    <> Created OraclePrice struct from price_update_v2");
 
     // Find the custody key associated with the trade oracle key
     let associated_custody_key = indexed_custodies
@@ -496,7 +492,7 @@ pub async fn check_liquidation_sl_tp_conditions(
         .map(|(k, _)| k.clone())
         .ok_or(anyhow::anyhow!("No custody found for trade oracle key"))?;
 
-    log::info!("    <> Pricefeed {:#?} update (price: {})", associated_custody_key, oracle_price.price);
+    log::debug!("    <> Pricefeed {:#?} update (price: {})", associated_custody_key, oracle_price.price);
 
     // check SL/TP/LIQ conditions for all indexed positions associated with the associated_custody_key
     // and that are not pending cleanup and close (just in case the position was partially handled by sablier)
@@ -523,7 +519,6 @@ pub async fn check_liquidation_sl_tp_conditions(
             Arc::clone(&payer),
         );
         let task = tokio::spawn(async move {
-
             let result: Result<(), anyhow::Error> = async {
                 match position.side {
                     1 => {
@@ -531,7 +526,7 @@ pub async fn check_liquidation_sl_tp_conditions(
 
                         // Check SL
                         if position.stop_loss_thread_is_set != 0 {
-                            handlers::sl_long::sl_long(
+                            if let Err(e) = handlers::sl_long::sl_long(
                                 &position_key,
                                 &position,
                                 &oracle_price,
@@ -541,12 +536,15 @@ pub async fn check_liquidation_sl_tp_conditions(
                                 &cortex,
                                 median_priority_fee,
                             )
-                            .await;
+                            .await
+                            {
+                                log::error!("Error in sl_long: {}", e);
+                            }
                         }
 
                         // Check TP
                         if position.take_profit_thread_is_set != 0 {
-                            handlers::tp_long::tp_long(
+                            if let Err(e) = handlers::tp_long::tp_long(
                                 &position_key,
                                 &position,
                                 &oracle_price,
@@ -556,7 +554,10 @@ pub async fn check_liquidation_sl_tp_conditions(
                                 &cortex,
                                 median_priority_fee,
                             )
-                            .await;
+                            .await
+                            {
+                                log::error!("Error in tp_long: {}", e);
+                            }
                         }
 
                         // Check LIQ
@@ -568,7 +569,7 @@ pub async fn check_liquidation_sl_tp_conditions(
 
                         // Check SL
                         if position.stop_loss_thread_is_set != 0 {
-                            handlers::sl_short::sl_short(
+                            if let Err(e) = handlers::sl_short::sl_short(
                                 &position_key,
                                 &position,
                                 &oracle_price,
@@ -578,12 +579,15 @@ pub async fn check_liquidation_sl_tp_conditions(
                                 &cortex,
                                 median_priority_fee,
                             )
-                            .await;
+                            .await
+                            {
+                                log::error!("Error in sl_short: {}", e);
+                            }
                         }
 
                         // Check TP
                         if position.take_profit_thread_is_set != 0 {
-                            handlers::tp_short::tp_short(
+                            if let Err(e) = handlers::tp_short::tp_short(
                                 &position_key,
                                 &position,
                                 &oracle_price,
@@ -593,7 +597,10 @@ pub async fn check_liquidation_sl_tp_conditions(
                                 &cortex,
                                 median_priority_fee,
                             )
-                            .await;
+                            .await
+                            {
+                                log::error!("Error in tp_short: {}", e);
+                            }
                         }
 
                         // Check LIQ
@@ -636,6 +643,7 @@ pub async fn update_indexed_positions(
     position_account_data: &[u8],
     indexed_positions: &IndexedPositionsThreadSafe,
 ) -> Result<Option<Position>, backoff::Error<anyhow::Error>> {
+    log::info!(">>> Update on position: {:#?}", position_account_key);
     if position_account_data.is_empty() {
         log::info!("Position closed: {:#?}", position_account_key);
         indexed_positions
@@ -650,9 +658,9 @@ pub async fn update_indexed_positions(
         let mut positions = indexed_positions.write().await;
         let is_new_position = !positions.contains_key(&position_account_key);
         if is_new_position {
-            log::info!("Position modified: {:#?}", position_account_key);
-        } else {
             log::info!("New position created: {:#?}", position_account_key);
+        } else {
+            log::info!("Position modified: {:#?}", position_account_key);
         }
         // Either way, update or create, this operation is the sames
         positions.insert(position_account_key.clone(), position);
