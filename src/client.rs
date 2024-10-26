@@ -218,9 +218,10 @@ async fn main() -> anyhow::Result<()> {
                 .map_err(|e| backoff::Error::transient(e.into()))?;
 
             let payer = read_keypair_file(args.payer_keypair.clone()).unwrap();
+            let payer = Arc::new(payer);
             let client = Client::new(
                 Cluster::Custom(args.endpoint.clone(), args.endpoint.clone()),
-                Arc::new(payer), // Change Rc to Arc
+                Arc::clone(&payer),
             );
             let program = client
                 .program(adrena_abi::ID)
@@ -345,7 +346,8 @@ async fn main() -> anyhow::Result<()> {
                         message.map_err(|e| backoff::Error::transient(e.into())),
                         &indexed_positions,
                         &indexed_custodies,
-                        &program,
+                        &payer,
+                        &args.endpoint.clone(),
                         &cortex,
                         *median_priority_fee.lock().await,
                     )
@@ -379,7 +381,8 @@ async fn process_stream_message(
     message: Result<SubscribeUpdate, backoff::Error<anyhow::Error>>,
     indexed_positions: &IndexedPositionsThreadSafe,
     indexed_custodies: &IndexedCustodiesThreadSafe,
-    program: &anchor_client::Program<Arc<Keypair>>,
+    payer: &Arc<Keypair>,
+    endpoint: &str,
     cortex: &Cortex,
     median_priority_fee: u64,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
@@ -396,7 +399,8 @@ async fn process_stream_message(
                         &account_data,
                         indexed_positions,
                         indexed_custodies,
-                        program,
+                        payer,
+                        endpoint,
                         cortex,
                         median_priority_fee,
                     )
@@ -404,21 +408,45 @@ async fn process_stream_message(
                 }
 
                 if msg.filters.contains(&"positions".to_owned()) {
-                    let indexed_custodies_count_before = indexed_custodies.read().await.len();
-                    // Also updates the indexed custodies map based on the new position
-                    update_indexed_positions(
+                    // Updates the indexed positions map
+                    let new_position = update_indexed_positions(
                         &account_key,
                         &account_data,
                         indexed_positions,
-                        indexed_custodies,
-                        program,
                     )
                     .await?;
-                    let indexed_custodies_count_after = indexed_custodies.read().await.len();
 
-                    // if the indexed custodies map has a new custody, update the subscription request
-                    if indexed_custodies_count_after > indexed_custodies_count_before {
-                        // TODO: update the subscription request
+                    // If a new position was created
+                    if let Some(new_position) = new_position {
+                        // If the new position's custody is not yet in the indexed custodies map, fetch it from the RPC
+                        if !indexed_custodies
+                            .read()
+                            .await
+                            .contains_key(&new_position.custody)
+                        {
+                            let client = Client::new(
+                                Cluster::Custom(endpoint.to_string(), endpoint.to_string()),
+                                Arc::clone(&payer),
+                            );
+                            let program = client
+                                .program(adrena_abi::ID)
+                            .map_err(|e| backoff::Error::transient(e.into()))?;
+            
+                            let custody = program
+                                .account::<adrena_abi::types::Custody>(new_position.custody)
+                                .await
+                                .map_err(|e| backoff::Error::transient(e.into()))?;
+
+                            // Update the indexed custodies map
+                            indexed_custodies
+                                .write()
+                                .await
+                                .insert(new_position.custody, custody);
+                            log::info!("  <> Fetched new custody {:#?} from RPC", new_position.custody);
+                            
+                            // Update the subscription request to include the new custody's price update v2 account
+                            // TODO
+                        }
                     }
                 }
             }
@@ -440,7 +468,8 @@ pub async fn check_liquidation_sl_tp_conditions(
     trade_oracle_data: &[u8],
     indexed_positions: &IndexedPositionsThreadSafe,
     indexed_custodies: &IndexedCustodiesThreadSafe,
-    program: &anchor_client::Program<Arc<Keypair>>,
+    payer: &Arc<Keypair>,
+    endpoint: &str,
     cortex: &Cortex,
     median_priority_fee: u64,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
@@ -474,87 +503,121 @@ pub async fn check_liquidation_sl_tp_conditions(
 
     // make a clone of the indexed positions map to iterate over (while we modify the original map)
     let positions_shallow_clone = indexed_positions.read().await.clone();
+    let mut tasks = vec![];
+
     for (position_key, position) in
         positions_shallow_clone.iter().filter(|(_, p)| {
             p.custody == associated_custody_key && p.pending_cleanup_and_close == 0
         })
     {
-        match position.side {
-            1 => {
-                /* LONG */
+        let position_key = position_key.clone();
+        let position = position.clone();
+        let oracle_price = oracle_price.clone();
+        let indexed_custodies = Arc::clone(indexed_custodies);
+        let indexed_positions = Arc::clone(indexed_positions);
+        let cortex = cortex.clone();
+        let median_priority_fee = median_priority_fee;
 
-                // Check SL
-                if position.stop_loss_thread_is_set != 0 {
-                    handlers::sl_long::sl_long(
-                        position_key,
-                        position,
-                        &oracle_price,
-                        indexed_custodies,
-                        indexed_positions,
-                        program,
-                        cortex,
-                        median_priority_fee,
-                    )
-                    .await?;
+        let client = Client::new(
+            Cluster::Custom(endpoint.to_string(), endpoint.to_string()),
+            Arc::clone(&payer),
+        );
+        let task = tokio::spawn(async move {
+
+            let result: Result<(), anyhow::Error> = async {
+                match position.side {
+                    1 => {
+                        /* LONG */
+
+                        // Check SL
+                        if position.stop_loss_thread_is_set != 0 {
+                            handlers::sl_long::sl_long(
+                                &position_key,
+                                &position,
+                                &oracle_price,
+                                &indexed_custodies,
+                                &indexed_positions,
+                                &client,
+                                &cortex,
+                                median_priority_fee,
+                            )
+                            .await;
+                        }
+
+                        // Check TP
+                        if position.take_profit_thread_is_set != 0 {
+                            handlers::tp_long::tp_long(
+                                &position_key,
+                                &position,
+                                &oracle_price,
+                                &indexed_custodies,
+                                &indexed_positions,
+                                &client,
+                                &cortex,
+                                median_priority_fee,
+                            )
+                            .await;
+                        }
+
+                        // Check LIQ
+                        // TODO : recalculate the liquidation price and check if the price has crossed it
+                        // log::warn!("TODO: check LIQ");
+                    }
+                    0 => {
+                        /* SHORT */
+
+                        // Check SL
+                        if position.stop_loss_thread_is_set != 0 {
+                            handlers::sl_short::sl_short(
+                                &position_key,
+                                &position,
+                                &oracle_price,
+                                &indexed_custodies,
+                                &indexed_positions,
+                                &client,
+                                &cortex,
+                                median_priority_fee,
+                            )
+                            .await;
+                        }
+
+                        // Check TP
+                        if position.take_profit_thread_is_set != 0 {
+                            handlers::tp_short::tp_short(
+                                &position_key,
+                                &position,
+                                &oracle_price,
+                                &indexed_custodies,
+                                &indexed_positions,
+                                &client,
+                                &cortex,
+                                median_priority_fee,
+                            )
+                            .await;
+                        }
+
+                        // Check LIQ
+                        // TODO : recalculate the liquidation price and check if the price has crossed it
+                        // log::warn!("TODO: check LIQ");
+                    }
+                    _ => {}
                 }
-
-                // Check TP
-                if position.take_profit_thread_is_set != 0 {
-                    handlers::tp_long::tp_long(
-                        position_key,
-                        position,
-                        &oracle_price,
-                        indexed_custodies,
-                        indexed_positions,
-                        program,
-                        cortex,
-                        median_priority_fee,
-                    )
-                    .await?;
-                }
-
-                // Check LIQ
-                // TODO : recalculate the liquidation price and check if the price has crossed it
-                // log::warn!("TODO: check LIQ");
+                Ok::<(), anyhow::Error>(())
             }
-            0 => {
-                /* SHORT */
+            .await;
 
-                // Check SL
-                if position.stop_loss_thread_is_set != 0 {
-                    handlers::sl_short::sl_short(
-                        position_key,
-                        position,
-                        &oracle_price,
-                        indexed_custodies,
-                        indexed_positions,
-                        program,
-                        cortex,
-                        median_priority_fee,
-                    )
-                    .await?;
-                }
-
-                // Check TP
-                if position.take_profit_thread_is_set != 0 {
-                    handlers::tp_short::tp_short(
-                        position_key,
-                        position,
-                        &oracle_price,
-                        indexed_custodies,
-                        indexed_positions,
-                        program,
-                        cortex,
-                        median_priority_fee,
-                    )
-                    .await?;
-                }
-
-                // Check LIQ
-                // TODO : recalculate the liquidation price and check if the price has crossed it
-                // log::warn!("TODO: check LIQ");
+            if let Err(e) = result {
+                log::error!("Error processing position {}: {:?}", position_key, e);
             }
-            _ => {}
+        });
+
+        tasks.push(task);
+    }
+
+    // Wait for all tasks to complete
+    for task in tasks {
+        if let Err(e) = task.await {
+            log::error!("Task failed: {:?}", e);
         }
     }
     Ok(())
@@ -566,13 +629,13 @@ pub async fn check_liquidation_sl_tp_conditions(
 // - If the position is not currently indexed, it means it is a new position and we need to create an entry for it in the map
 // - If the account data is empty, it means the position was closed and we need to delete it from the map
 // - If the position is currently indexed and is in the received account with non-empty data, it means the position was modified and we need to update the existing entry in the map with the new data
+//
+// Return the updated position if it was created, None if it was closed or modified
 pub async fn update_indexed_positions(
     position_account_key: &Pubkey,
     position_account_data: &[u8],
     indexed_positions: &IndexedPositionsThreadSafe,
-    indexed_custodies: &IndexedCustodiesThreadSafe,
-    program: &anchor_client::Program<Arc<Keypair>>,
-) -> Result<(), backoff::Error<anyhow::Error>> {
+) -> Result<Option<Position>, backoff::Error<anyhow::Error>> {
     if position_account_data.is_empty() {
         log::info!("Position closed: {:#?}", position_account_key);
         indexed_positions
@@ -585,31 +648,21 @@ pub async fn update_indexed_positions(
                 .map_err(|e| backoff::Error::transient(e.into()))?;
 
         let mut positions = indexed_positions.write().await;
-        if positions.contains_key(&position_account_key) {
+        let is_new_position = !positions.contains_key(&position_account_key);
+        if is_new_position {
             log::info!("Position modified: {:#?}", position_account_key);
         } else {
             log::info!("New position created: {:#?}", position_account_key);
         }
         // Either way, update or create, this operation is the sames
         positions.insert(position_account_key.clone(), position);
-
-        // If the indexed_custodies map doesn't have the position's custody, add it
-        if !indexed_custodies
-            .read()
-            .await
-            .contains_key(&position.custody)
-        {
-            let custody = program
-                .account::<adrena_abi::types::Custody>(position.custody)
-                .await
-                .map_err(|e| backoff::Error::transient(e.into()))?;
-            indexed_custodies
-                .write()
-                .await
-                .insert(position.custody, custody);
+        if is_new_position {
+            return Ok(Some(position));
+        } else {
+            return Ok(None);
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 // Update the indexed custodies map based on the indexed positions
