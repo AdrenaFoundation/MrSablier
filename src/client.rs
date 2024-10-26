@@ -404,11 +404,11 @@ pub async fn check_liquidation_sl_tp_conditions(
         .ok_or(anyhow::anyhow!("No custody found for trade oracle key"))?;
 
     // check SL/TP/LIQ conditions for all indexed positions associated with the associated_custody_key
-    for (position_key, position) in indexed_positions
-        .read()
-        .await
-        .iter()
-        .filter(|(_, p)| p.custody == associated_custody_key)
+    // and that are not pending cleanup and close (just in case the position was partially handled by sablier)
+    for (position_key, position) in
+        indexed_positions.read().await.iter().filter(|(_, p)| {
+            p.custody == associated_custody_key && p.pending_cleanup_and_close == 0
+        })
     {
         match position.side {
             1 => {
