@@ -50,11 +50,7 @@ pub async fn sl_short(
 
     let user_profile_pda = adrena_abi::pda::get_user_profile_pda(&position.owner).0;
     // Fetch the user profile account
-    let user_profile_account = program
-        .async_rpc()
-        .get_account(&user_profile_pda)
-        .await
-        .ok(); // Convert Result to Option, None if error
+    let user_profile_account = program.rpc().get_account(&user_profile_pda).await.ok(); // Convert Result to Option, None if error
 
     // Check if the user profile exists (owned by the Adrena program)
     let user_profile = match user_profile_account {
@@ -115,9 +111,9 @@ pub async fn sl_short(
             backoff::Error::transient(e.into())
         })?;
 
-    let async_rpc_client = program.async_rpc();
+    let rpc_client = program.rpc();
 
-    let tx_hash = async_rpc_client
+    let tx_hash = rpc_client
         .send_transaction_with_config(
             &tx,
             RpcSendTransactionConfig {

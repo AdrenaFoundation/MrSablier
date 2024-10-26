@@ -14,15 +14,11 @@ use {
         get_mean_prioritization_fee_by_percentile, GetRecentPrioritizationFeesByPercentileConfig,
     },
     pyth::PriceUpdateV2,
-    solana_client::{
-        nonblocking::rpc_client::RpcClient,
-        rpc_filter::{Memcmp, RpcFilterType},
-    },
+    solana_client::rpc_filter::{Memcmp, RpcFilterType},
     solana_sdk::{pubkey::Pubkey, signature::Keypair},
     std::{
         collections::{HashMap, HashSet},
         env,
-        error::Error,
         sync::Arc,
         time::Duration,
     },
@@ -114,7 +110,7 @@ impl Args {
             .x_token(self.x_token.clone())?
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
-            .tls_config(ClientTlsConfig::new())?
+            .tls_config(ClientTlsConfig::new().with_native_roots())?
             .connect()
             .await
             .map_err(Into::into)
@@ -163,7 +159,7 @@ fn create_accounts_filter_map(trade_oracles_keys: Vec<Pubkey>) -> AccountFilterM
     accounts_filter_map
 }
 
-async fn fetch_priority_fee(client: &RpcClient) -> Result<u64, anyhow::Error> {
+async fn fetch_priority_fee(client: &Client<Arc<Keypair>>) -> Result<u64, anyhow::Error> {
     // Change the return type to anyhow::Error
     let config = GetRecentPrioritizationFeesByPercentileConfig {
         percentile: Some(MEAN_PRIORITY_FEE_PERCENTILE),
@@ -316,7 +312,6 @@ async fn main() -> anyhow::Result<()> {
             // Side thread to fetch the median priority fee every 5 seconds
             // ////////////////////////////////////////////////////////////////
             let median_priority_fee = Arc::new(Mutex::new(0u64));
-            let rpc_client = program.async_rpc();
             // Spawn a task to poll priority fees every 5 seconds
             periodical_priority_fees_fetching_task = Some({
                 let median_priority_fee = Arc::clone(&median_priority_fee);
@@ -324,7 +319,7 @@ async fn main() -> anyhow::Result<()> {
                     let mut fee_refresh_interval = interval(PRIORITY_FEE_REFRESH_INTERVAL);
                     loop {
                         fee_refresh_interval.tick().await;
-                        if let Ok(fee) = fetch_priority_fee(&rpc_client).await {
+                        if let Ok(fee) = fetch_priority_fee(&client).await {
                             let mut fee_lock = median_priority_fee.lock().await;
                             *fee_lock = fee;
                             log::info!(

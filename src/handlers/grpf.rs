@@ -1,8 +1,10 @@
 use {
+    adrena_abi::ADRENA_PROGRAM_ID,
+    anchor_client::Client,
     serde_json,
-    solana_client::{nonblocking::rpc_client::RpcClient, rpc_response::RpcPrioritizationFee},
-    solana_sdk::pubkey::Pubkey,
-    std::error::Error,
+    solana_client::rpc_response::RpcPrioritizationFee,
+    solana_sdk::{pubkey::Pubkey, signature::Keypair},
+    std::{error::Error, sync::Arc},
 };
 
 pub struct GetRecentPrioritizationFeesByPercentileConfig {
@@ -12,7 +14,7 @@ pub struct GetRecentPrioritizationFeesByPercentileConfig {
 }
 
 pub async fn get_recent_prioritization_fees_by_percentile(
-    client: &RpcClient,
+    client: &Client<Arc<Keypair>>,
     config: &GetRecentPrioritizationFeesByPercentileConfig,
     slots_to_return: Option<usize>,
 ) -> Result<Vec<RpcPrioritizationFee>, Box<dyn Error>> {
@@ -28,6 +30,8 @@ pub async fn get_recent_prioritization_fees_by_percentile(
     }
 
     let response: Vec<RpcPrioritizationFee> = client
+        .program(ADRENA_PROGRAM_ID)?
+        .rpc()
         .send(
             solana_client::rpc_request::RpcRequest::GetRecentPrioritizationFees,
             serde_json::Value::from(args),
@@ -70,7 +74,7 @@ pub async fn get_recent_prioritization_fees_by_percentile(
 // }
 
 pub async fn get_mean_prioritization_fee_by_percentile(
-    client: &RpcClient,
+    client: &Client<Arc<Keypair>>,
     config: &GetRecentPrioritizationFeesByPercentileConfig,
     slots_to_return: Option<usize>,
 ) -> Result<u64, Box<dyn Error>> {

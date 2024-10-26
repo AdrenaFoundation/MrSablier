@@ -28,18 +28,22 @@ hex = "0.4.3"
 log = "0.4.17"
 maplit = "1.0.2"
 serde_json = "1.0.86"
-solana-sdk = "=1.18.22"
-solana-transaction-status = "=1.18.22"
-solana-client = "=1.18.22"
-solana-account-decoder = "=1.18.22"
+solana-sdk = "~2.0.10"
+solana-transaction-status = "~2.0.10"
+solana-client = "~2.0.10"
+solana-account-decoder = "~2.0.10"
 tokio = { version = "1.21.2", features = ["rt-multi-thread"] }
-tonic = { version = "0.10.0", features = ["tls"] }
-yellowstone-grpc-client = "1.15.4"
-yellowstone-grpc-proto = { version = "1.14.2", default-features = true }
+tonic = "0.12.3"
+yellowstone-grpc-client = "2.0.0"
+yellowstone-grpc-proto = { version = "2.0.0", default-features = true }
 sha2 = "0.10.8"
 num-traits = "0.2.19"
-adrena-abi = { git = "ssh://git@github.com/AdrenaFoundation/adrena.git", rev = "129dbf53ac3160c13680af2940797b1d6c2f4ad3" }
-anchor-client = { version = "0.29.0", features = ["async"] }
+adrena-abi = { git = "ssh://git@github.com/AdrenaFoundation/adrena-abi.git", rev = "4fed2cdca08ea7d3c2ea680052ce36cce62d0e26" }
+# anchor-client = { version = "0.29.0", features = ["async"] }
+# Waiting for 0.31.0 release - includes a fix on the async - https://github.com/coral-xyz/anchor/pull/3057
+anchor-client = { git = "https://github.com/coral-xyz/anchor.git", rev = "fe4fcded34a68934a6017a85d43a307cdb86d803", features = [
+    "async",
+] }
 
 [profile.release]
 lto = true
