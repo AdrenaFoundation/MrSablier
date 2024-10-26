@@ -27,8 +27,7 @@ use {
         time::Duration,
     },
     tokio::{
-        sync::{Mutex, RwLock},
-        time::interval,
+        sync::{Mutex, RwLock}, task::JoinHandle, time::interval
     },
     tonic::transport::channel::ClientTlsConfig,
     utils::OraclePrice,
@@ -200,8 +199,14 @@ async fn main() -> anyhow::Result<()> {
         let zero_attempts = Arc::clone(&zero_attempts);
         let indexed_positions = Arc::clone(&indexed_positions);
         let indexed_custodies = Arc::clone(&indexed_custodies);
+        let mut periodical_priority_fees_fetching_task: Option<JoinHandle<Result<(), backoff::Error<anyhow::Error>>>> = None;
 
         async move {
+            // In case it errored out, abort the fee task (will be recreated)
+            if let Some(t) = periodical_priority_fees_fetching_task.as_mut() {
+                t.abort();
+            }
+
             let mut zero_attempts = zero_attempts.lock().await;
             if *zero_attempts {
                 *zero_attempts = false;
@@ -313,7 +318,7 @@ async fn main() -> anyhow::Result<()> {
             let median_priority_fee = Arc::new(Mutex::new(0u64));
             let rpc_client = program.async_rpc();
             // Spawn a task to poll priority fees every 5 seconds
-            let _fee_task = {
+            periodical_priority_fees_fetching_task = Some({
                 let median_priority_fee = Arc::clone(&median_priority_fee);
                 tokio::spawn(async move {
                     let mut fee_refresh_interval = interval(PRIORITY_FEE_REFRESH_INTERVAL);
@@ -329,7 +334,7 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
                 })
-            };
+            });
 
             // ////////////////////////////////////////////////////////////////
             // CORE LOOP
@@ -365,9 +370,6 @@ async fn main() -> anyhow::Result<()> {
             }
 
             // log::info!("  <> stream closed");
-
-            // Ensure the fee task is awaited or handled properly
-            // fee_task.await.unwrap();
 
             
             Ok::<(), backoff::Error<anyhow::Error>>(())
