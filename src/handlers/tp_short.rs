@@ -22,7 +22,7 @@ pub async fn tp_short(
     median_priority_fee: u64,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
     // check if the price has crossed the TP
-    if oracle_price.price >= position.take_profit_limit_price {
+    if oracle_price.price <= position.take_profit_limit_price {
         log::info!("TP condition met for SHORT position {:#?}", position_key);
     } else {
         return Ok(());
