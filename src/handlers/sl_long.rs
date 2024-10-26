@@ -1,7 +1,7 @@
 use {
     crate::{
         handlers::create_close_position_long_ix, utils, IndexedCustodiesThreadSafe,
-        CLOSE_POSITION_LONG_CU_LIMIT,
+        IndexedPositionsThreadSafe, CLOSE_POSITION_LONG_CU_LIMIT,
     },
     adrena_abi::{
         main_pool::USDC_CUSTODY_ID, types::Cortex, ADX_MINT, ALP_MINT,
@@ -17,6 +17,7 @@ pub async fn sl_long(
     position: &adrena_abi::types::Position,
     oracle_price: &utils::oracle_price::OraclePrice,
     indexed_custodies: &IndexedCustodiesThreadSafe,
+    indexed_positions: &IndexedPositionsThreadSafe,
     program: &anchor_client::Program<Arc<Keypair>>,
     cortex: &Cortex,
     median_priority_fee: u64,
@@ -27,7 +28,6 @@ pub async fn sl_long(
     } else {
         return Ok(());
     }
-    log::info!("SL condition met for LONG position {:#?}", position_key);
 
     let indexed_custodies_read = indexed_custodies.read().await;
     let custody = indexed_custodies_read.get(&position.custody).unwrap();
@@ -107,27 +107,44 @@ pub async fn sl_long(
         ))
         .args(close_position_long_params)
         .accounts(close_position_long_accounts)
-        .send()
-        // .send_with_spinner_and_config(RpcSendTransactionConfig {
-        //     skip_preflight: true,
-        //     preflight_commitment: None,
-        //     encoding: None,
-        //     max_retries: None,
-        //     min_context_slot: None,
-        // })
+        .signed_transaction()
         .await
         .map_err(|e| {
-            log::error!("Transaction failed with error: {:?}", e);
+            log::error!("Transaction generation failed with error: {:?}", e);
+            backoff::Error::transient(e.into())
+        })?;
+
+    let async_rpc_client = program.async_rpc();
+
+    let tx_hash = async_rpc_client
+        .send_transaction_with_config(
+            &tx,
+            RpcSendTransactionConfig {
+                skip_preflight: true,
+                max_retries: Some(0),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|e| {
+            log::error!("Transaction sending failed with error: {:?}", e);
             backoff::Error::transient(e.into())
         })?;
 
     log::info!(
         " SL Long for position {:#?} - TX sent: {:#?}",
         position_key,
-        tx
+        tx_hash.to_string(),
     );
 
     // TODO wait for confirmation and retry if needed
+
+    // drop the position from the array
+    indexed_positions
+        .write()
+        .await
+        .retain(|p, _| p != position_key);
+    log::info!("Position {:#?} de-indexed", position_key);
 
     Ok(())
 }
