@@ -61,7 +61,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const MEAN_PRIORITY_FEE_PERCENTILE: u64 = 3000; // 30th
 const PRIORITY_FEE_REFRESH_INTERVAL: Duration = Duration::from_secs(5); // seconds
 pub const CLOSE_POSITION_LONG_CU_LIMIT: u32 = 380_000;
-pub const CLOSE_POSITION_SHORT_CU_LIMIT: u32 = 250_000;
+pub const CLOSE_POSITION_SHORT_CU_LIMIT: u32 = 280_000;
 
 #[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
 enum ArgsCommitment {
@@ -660,7 +660,7 @@ pub async fn check_liquidation_sl_tp_conditions(
                         // TODO : recalculate the liquidation price and check if the price has crossed it
                         // log::warn!("TODO: check LIQ");
                     }
-                    0 => {
+                    2 => {
                         /* SHORT */
 
                         // Check SL
