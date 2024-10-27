@@ -199,7 +199,7 @@ async fn main() -> anyhow::Result<()> {
 
         async move {
             // In case it errored out, abort the fee task (will be recreated)
-            if let Some(t) = periodical_priority_fees_fetching_task.as_mut() {
+            if let Some(t) = periodical_priority_fees_fetching_task.take() {
                 t.abort();
             }
 
@@ -314,6 +314,8 @@ async fn main() -> anyhow::Result<()> {
             // ////////////////////////////////////////////////////////////////
             let median_priority_fee = Arc::new(Mutex::new(0u64));
             // Spawn a task to poll priority fees every 5 seconds
+            #[allow(unused_assignments)]
+            {
             periodical_priority_fees_fetching_task = Some({
                 let median_priority_fee = Arc::clone(&median_priority_fee);
                 tokio::spawn(async move {
@@ -331,6 +333,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                 })
             });
+        }
 
             // ////////////////////////////////////////////////////////////////
             // CORE LOOP
@@ -701,4 +704,5 @@ async fn update_indexed_custodies(
 
     Ok(())
 }
+
 
