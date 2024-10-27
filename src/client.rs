@@ -286,12 +286,18 @@ async fn main() -> anyhow::Result<()> {
                     &get_position_anchor_discriminator(),
                 ));
                 let filters = vec![position_pda_filter];
-                let existing_positions_accounts = program
+                let mut existing_positions_accounts = program
                     .accounts::<Position>(filters)
                     .await
                     .map_err(|e| backoff::Error::transient(e.into()))?;
                 {
                     let mut indexed_positions = indexed_positions.write().await;
+
+                    // filter out the positions that are pending cleanup and close
+                    existing_positions_accounts.retain(|(_, position)| {
+                        position.pending_cleanup_and_close == 0
+                    });
+
                     indexed_positions.extend(existing_positions_accounts);
                 }
                 log::info!(
@@ -442,56 +448,88 @@ where
 
                 if msg.filters.contains(&"positions_create_update".to_owned()) {
                     // Updates the indexed positions map
-                    let new_position =
+                    let update =
                         update_indexed_positions(&account_key, &account_data, indexed_positions)
                             .await?;
 
                     // Update the indexed custodies map and the subscriptions request if a new position was created
-                    if let Some(new_position) = new_position {
-                        // If the new position's custody is not yet in the indexed custodies map, fetch it from the RPC
-                        if !indexed_custodies
-                            .read()
-                            .await
-                            .contains_key(&new_position.custody)
-                        {
-                            let client = Client::new(
-                                Cluster::Custom(endpoint.to_string(), endpoint.to_string()),
-                                Arc::clone(payer),
-                            );
-                            let program = client
-                                .program(adrena_abi::ID)
-                                .map_err(|e| backoff::Error::transient(e.into()))?;
-
-                            let custody = program
-                                .account::<adrena_abi::types::Custody>(new_position.custody)
+                    match update {
+                        PositionUpdate::Created(new_position) => {
+                            log::info!("(pcu) New position created: {:#?}", account_key);
+                            // If the new position's custody is not yet in the indexed custodies map, fetch it from the RPC
+                            if !indexed_custodies
+                                .read()
                                 .await
-                                .map_err(|e| backoff::Error::transient(e.into()))?;
+                                .contains_key(&new_position.custody)
+                            {
+                                let client = Client::new(
+                                    Cluster::Custom(endpoint.to_string(), endpoint.to_string()),
+                                    Arc::clone(payer),
+                                );
+                                let program = client
+                                    .program(adrena_abi::ID)
+                                    .map_err(|e| backoff::Error::transient(e.into()))?;
 
-                            // Update the indexed custodies map
-                            indexed_custodies
-                                .write()
-                                .await
-                                .insert(new_position.custody, custody);
-                            log::info!(
-                                "  <> Fetched new custody {:#?} from RPC",
-                                new_position.custody
-                            );
+                                let custody = program
+                                    .account::<adrena_abi::types::Custody>(new_position.custody)
+                                    .await
+                                    .map_err(|e| backoff::Error::transient(e.into()))?;
+
+                                // Update the indexed custodies map
+                                indexed_custodies
+                                    .write()
+                                    .await
+                                    .insert(new_position.custody, custody);
+                                log::info!(
+                                    "(pcu) Fetched new custody {:#?} from RPC",
+                                    new_position.custody
+                                );
+                            }
+
+                            // We need to update the subscriptions request to include the new position (and maybe the new custody's price update v2 account)
+                            subscriptions_update_required = true;
                         }
-
-                        // We need to update the subscriptions request to include the new position (and maybe the new custody's price update v2 account)
-                        subscriptions_update_required = true;
+                        PositionUpdate::PendingCleanupAndClose(_position) => {
+                            log::info!(
+                                "(pcu) Position pending cleanup and close: {:#?}",
+                                account_key
+                            );
+                            // We need to update the subscriptions request to include the modified position
+                            subscriptions_update_required = true;
+                            // TODO: Call cleanup and close for position
+                        }
+                        PositionUpdate::Modified(_position) => {
+                            log::info!("(pcu) Position modified: {:#?}", account_key);
+                        }
+                        PositionUpdate::Closed => {
+                            log::info!("(pcu) Position closed: {:#?}", account_key);
+                        }
                     }
                 }
-
-                if msg.filters.contains(&"positions_close".to_owned()) {
+                /* Else if is important as we only want to end up here if the message is not about a  positions_create_update*/
+                else if msg.filters.contains(&"positions_close".to_owned()) {
                     // Updates the indexed positions map
-                    update_indexed_positions(&account_key, &account_data, indexed_positions)
-                        .await?;
-                    // We need to update the subscriptions request to remove the closed position
-                    subscriptions_update_required = true;
+                    let update =
+                        update_indexed_positions(&account_key, &account_data, indexed_positions)
+                            .await?;
+                    match update {
+                        PositionUpdate::Created(_) => {
+                            panic!("New position created in positions_close filter");
+                        }
+                        PositionUpdate::Modified(_) => {
+                            panic!("New position created in positions_close filter");
+                        }
+                        PositionUpdate::PendingCleanupAndClose(_) => {
+                            panic!("New position created in positions_close filter");
+                        }
+                        PositionUpdate::Closed => {
+                            log::info!("(pc) Position closed: {:#?}", account_key);
+                            // We need to update the subscriptions request to remove the closed position
+                            subscriptions_update_required = true;
+                        }
+                    }
                 }
             }
-            // log::debug!("new message: {msg:?}")
         }
         Err(error) => {
             log::error!("error: {error:?}");
@@ -686,6 +724,13 @@ pub async fn check_liquidation_sl_tp_conditions(
     Ok(())
 }
 
+pub enum PositionUpdate {
+    Created(Position),
+    Modified(Position),
+    PendingCleanupAndClose(Position),
+    Closed,
+}
+
 // Update the indexed positions map with the account received from the stream
 // The update can be about creating or deleting or modifying a position
 // This is based on the currently indexed positions and the pubkey/data of the account received
@@ -698,34 +743,29 @@ pub async fn update_indexed_positions(
     position_account_key: &Pubkey,
     position_account_data: &[u8],
     indexed_positions: &IndexedPositionsThreadSafe,
-) -> Result<Option<Position>, backoff::Error<anyhow::Error>> {
+) -> Result<PositionUpdate, backoff::Error<anyhow::Error>> {
     if position_account_data.is_empty() {
-        log::info!("Position closed: {:#?}", position_account_key);
         indexed_positions.write().await.remove(position_account_key);
-    } else {
-        let position: adrena_abi::types::Position =
-            adrena_abi::types::Position::try_deserialize(&mut &position_account_data[..])
-                .map_err(|e| backoff::Error::transient(e.into()))?;
-
-        let mut positions = indexed_positions.write().await;
-        let is_new_position = !positions.contains_key(position_account_key);
-        if is_new_position {
-            log::info!("New position created: {:#?}", position_account_key);
-        } else {
-            log::info!("Position modified: {:#?}", position_account_key);
-        }
-
-        // Either way, update or create, this operation is the sames
-        positions.insert(*position_account_key, position);
-
-        // Return the new position if it was created, None if it was modified
-        if is_new_position {
-            return Ok(Some(position));
-        } else {
-            return Ok(None);
-        }
+        return Ok(PositionUpdate::Closed);
     }
-    Ok(None)
+    let position: adrena_abi::types::Position =
+        adrena_abi::types::Position::try_deserialize(&mut &position_account_data[..])
+            .map_err(|e| backoff::Error::transient(e.into()))?;
+
+    // Special case - If Sablier race us for the Close/liquidate, we want to remove the position (if closed by sablier it will remain in cleanup and close mode)
+    if position.pending_cleanup_and_close == 1 {
+        indexed_positions.write().await.remove(position_account_key);
+        return Ok(PositionUpdate::PendingCleanupAndClose(position));
+    }
+    let mut positions = indexed_positions.write().await;
+    let is_new_position = !positions.contains_key(position_account_key);
+    // Either way, update or create, this operation is the sames
+    positions.insert(*position_account_key, position);
+
+    if is_new_position {
+        return Ok(PositionUpdate::Created(position));
+    }
+    return Ok(PositionUpdate::Modified(position));
 }
 
 // Update the indexed custodies map based on the indexed positions
