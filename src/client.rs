@@ -2,33 +2,19 @@ use {
     adrena_abi::{
         main_pool::USDC_CUSTODY_ID,
         types::{Cortex, Position},
-    },
-    anchor_client::{
+    }, anchor_client::{
         anchor_lang::AccountDeserialize, solana_sdk::signer::keypair::read_keypair_file, Client,
         Cluster,
-    },
-    backoff::{future::retry, ExponentialBackoff},
-    clap::Parser,
-    futures::{future::TryFutureExt, stream::StreamExt},
-    handlers::{
+    }, backoff::{future::retry, ExponentialBackoff}, clap::Parser, futures::{channel::mpsc::SendError, Sink, StreamExt, TryFutureExt, SinkExt}, handlers::{
         get_mean_prioritization_fee_by_percentile, GetRecentPrioritizationFeesByPercentileConfig,
-    },
-    pyth::PriceUpdateV2,
-    solana_client::rpc_filter::{Memcmp, RpcFilterType},
-    solana_sdk::{pubkey::Pubkey, signature::Keypair},
-    std::{
+    }, pyth::PriceUpdateV2, solana_client::rpc_filter::{Memcmp, RpcFilterType}, solana_sdk::{pubkey::Pubkey, signature::Keypair}, std::{
         collections::{HashMap, HashSet},
         env,
         sync::Arc,
         time::Duration,
-    },
-    tokio::{
+    }, tokio::{
         sync::{Mutex, RwLock}, task::JoinHandle, time::interval
-    },
-    tonic::transport::channel::ClientTlsConfig,
-    utils::OraclePrice,
-    yellowstone_grpc_client::{GeyserGrpcClient, Interceptor},
-    yellowstone_grpc_proto::{
+    }, tonic::transport::channel::ClientTlsConfig, utils::OraclePrice, yellowstone_grpc_client::{GeyserGrpcClient, Interceptor}, yellowstone_grpc_proto::{
         geyser::{
             subscribe_update::UpdateOneof, SubscribeRequest, SubscribeRequestFilterAccountsFilter,
             SubscribeRequestFilterAccountsFilterMemcmp, SubscribeUpdate,
@@ -38,8 +24,10 @@ use {
             subscribe_request_filter_accounts_filter_memcmp::Data as AccountsFilterMemcmpOneof,
             CommitmentLevel, SubscribeRequestFilterAccounts,
         },
-    },
+    }
 };
+
+use tokio::sync::mpsc::Sender;
 
 type AccountFilterMap = HashMap<String, SubscribeRequestFilterAccounts>;
 
@@ -121,10 +109,22 @@ pub fn get_position_anchor_discriminator() -> Vec<u8> {
     utils::derive_discriminator("Position").to_vec()
 }
 
-fn create_accounts_filter_map(trade_oracles_keys: Vec<Pubkey>) -> AccountFilterMap {
+async fn generate_accounts_filter_map(indexed_custodies: &IndexedCustodiesThreadSafe, indexed_positions: &IndexedPositionsThreadSafe) -> AccountFilterMap {
+    // Retrieve the price update v2 pdas from the indexed custodies
+    let trade_oracle_keys: Vec<String> = indexed_custodies
+        .read()
+        .await
+        .values()
+        .map(|c| c.trade_oracle.to_string())
+        .collect();
+
+    // Retrieve the existing positions keys - they are monitored for close events
+    let existing_positions_keys: Vec<String> = indexed_positions.read().await.keys().map(|p| p.to_string()).collect();
+    
+    // Create the accounts filter map (on all positions based on discriminator, and the above price update v2 pdas)
     let mut accounts_filter_map: AccountFilterMap = HashMap::new();
 
-    // Positions
+    // Positions (will catch new positions created and modified positions)
     let position_filter_discriminator = SubscribeRequestFilterAccountsFilter {
         filter: Some(AccountsFilterDataOneof::Memcmp(
             SubscribeRequestFilterAccountsFilterMemcmp {
@@ -137,11 +137,25 @@ fn create_accounts_filter_map(trade_oracles_keys: Vec<Pubkey>) -> AccountFilterM
     };
     let position_owner = vec![adrena_abi::ID.to_string()];
     accounts_filter_map.insert(
-        "positions".to_owned(),
+        "positions_create_update".to_owned(),
         SubscribeRequestFilterAccounts {
             account: vec![],
             owner: position_owner,
             filters: vec![position_filter_discriminator],
+        },
+    );
+
+    // Existing positions - We monitor these to check when they are closed 
+    // (during a close the Anchor Discriminator is also removed so previous filter won't catch it)
+    // let position_filter_zeroed = SubscribeRequestFilterAccountsFilter {
+    //     filter: Some(AccountsFilterDataOneof::Datasize(0)),
+    // };
+    accounts_filter_map.insert(
+        "positions_close".to_owned(),
+        SubscribeRequestFilterAccounts {
+            account: existing_positions_keys,
+            owner: vec![],
+            filters: vec![],
         },
     );
 
@@ -150,7 +164,7 @@ fn create_accounts_filter_map(trade_oracles_keys: Vec<Pubkey>) -> AccountFilterM
     accounts_filter_map.insert(
         "price_feeds".to_owned(),
         SubscribeRequestFilterAccounts {
-            account: trade_oracles_keys.iter().map(|p| p.to_string()).collect(),
+            account: trade_oracle_keys,
             owner: price_feed_owner,
             filters: vec![],
         },
@@ -272,34 +286,20 @@ async fn main() -> anyhow::Result<()> {
 
             // ////////////////////////////////////////////////////////////////
             // The account filter map is what is provided to the subscription request
-            // to inform the server about the accounts we are interested in observing changes  to
+            // to inform the server about the accounts we are interested in observing changes to
             // ////////////////////////////////////////////////////////////////
-            log::info!("2 - Initializing account filter map for...");
-            let accounts_filter_map = {
-                // Retrieve the price update v2 pdas from the indexed custodies
-                // They'll be monitored for updates
-                let trade_oracle_keys: Vec<Pubkey> = indexed_custodies
-                    .read()
-                    .await
-                    .values()
-                    .map(|c| c.trade_oracle)
-                    .collect();
-
-                // Create the accounts filter map (on all positions based on discriminator, and the above price update v2 pdas)
-                create_accounts_filter_map(trade_oracle_keys)
-            };
-            // ////////////////////////////////////////////////////////////////
-
-            // ////////////////////////////////////////////////////////////////
-            log::info!("3 - Opening stream...");
-            let (mut _subscribe_tx, mut stream) = {
+            log::info!("2 - Generate subscription request and open stream...");
+            let accounts_filter_map = 
+                generate_accounts_filter_map(&indexed_custodies, &indexed_positions).await;
+            log::info!("  <> Account filter map initialized");
+            let (mut subscribe_tx, mut stream) = {
                 let request = SubscribeRequest {
                     ping: None,
                     accounts: accounts_filter_map,
                     commitment: commitment.map(|c| c.into()),
                     ..Default::default()
                 };
-                log::debug!("Sending subscription request: {:?}", request);
+                log::debug!("  <> Sending subscription request: {:?}", request);
                 let (subscribe_tx, stream) = grpc
                     .subscribe_with_request(Some(request))
                     .await
@@ -314,6 +314,7 @@ async fn main() -> anyhow::Result<()> {
             // ////////////////////////////////////////////////////////////////
             let median_priority_fee = Arc::new(Mutex::new(0u64));
             // Spawn a task to poll priority fees every 5 seconds
+            log::info!("3 - Spawn a task to poll priority fees every 5 seconds...");
             #[allow(unused_assignments)]
             {
             periodical_priority_fees_fetching_task = Some({
@@ -326,14 +327,14 @@ async fn main() -> anyhow::Result<()> {
                             let mut fee_lock = median_priority_fee.lock().await;
                             *fee_lock = fee;
                             log::debug!(
-                            "  <> Updated median priority fee 30th percentile to : {} µLamports / cu",
-                            fee
-                        );
+                                "  <> Updated median priority fee 30th percentile to : {} µLamports / cu",
+                                fee
+                            );
                         }
                     }
-                })
-            });
-        }
+                    })
+                });
+            }
 
             // ////////////////////////////////////////////////////////////////
             // CORE LOOP
@@ -343,6 +344,7 @@ async fn main() -> anyhow::Result<()> {
             // liquidation/sl/tp conditions on the already indexed positions if 
             // coming from the position accounts, we update the indexed positions map
             // ////////////////////////////////////////////////////////////////
+            log::info!("4 - Start core loop: processing gRPC stream...");
             loop {
                 if let Some(message) = stream.next().await {
                     match process_stream_message(
@@ -352,6 +354,7 @@ async fn main() -> anyhow::Result<()> {
                         &payer,
                         &args.endpoint.clone(),
                         &cortex,
+                        &mut subscribe_tx,
                         *median_priority_fee.lock().await,
                     )
                     .await
@@ -359,7 +362,7 @@ async fn main() -> anyhow::Result<()> {
                         Ok(_) => continue,
                         Err(backoff::Error::Permanent(e)) => {
                             log::error!("Permanent error: {:?}", e);
-                            break; // or handle differently
+                            break;
                         }
                         Err(backoff::Error::Transient { err, .. }) => {
                             log::warn!("Transient error: {:?}", err);
@@ -380,21 +383,28 @@ async fn main() -> anyhow::Result<()> {
     .map_err(Into::into)
 }
 
-async fn process_stream_message(
+async fn process_stream_message<S>(
     message: Result<SubscribeUpdate, backoff::Error<anyhow::Error>>,
     indexed_positions: &IndexedPositionsThreadSafe,
     indexed_custodies: &IndexedCustodiesThreadSafe,
     payer: &Arc<Keypair>,
     endpoint: &str,
     cortex: &Cortex,
+    subscribe_tx: &mut S,
     median_priority_fee: u64,
-) -> Result<(), backoff::Error<anyhow::Error>> {
+) -> Result<(), backoff::Error<anyhow::Error>> 
+where
+    S: Sink<SubscribeRequest, Error = SendError> + Unpin,
+{
+    let mut subscriptions_update_required = false;
+
     match message {
         Ok(msg) => {
             if let Some(UpdateOneof::Account(sua)) = msg.update_oneof {
                 let account = sua.account.expect("Account should be defined");
                 let account_key = Pubkey::try_from(account.pubkey).expect("valid pubkey");
                 let account_data = account.data.to_vec();
+                // Each loop iteration we check if we need to update the subscription request based on what previously happened
 
                 if msg.filters.contains(&"price_feeds".to_owned()) {
                     check_liquidation_sl_tp_conditions(
@@ -408,9 +418,10 @@ async fn process_stream_message(
                         median_priority_fee,
                     )
                     .await?;
+                    // No subscriptions update needed here as this will trigger the update in the next cycle for position change (and update filters there)
                 }
 
-                if msg.filters.contains(&"positions".to_owned()) {
+                if msg.filters.contains(&"positions_create_update".to_owned()) {
                     // Updates the indexed positions map
                     let new_position = update_indexed_positions(
                         &account_key,
@@ -419,7 +430,7 @@ async fn process_stream_message(
                     )
                     .await?;
 
-                    // If a new position was created
+                    // Update the indexed custodies map and the subscriptions request if a new position was created
                     if let Some(new_position) = new_position {
                         // If the new position's custody is not yet in the indexed custodies map, fetch it from the RPC
                         if !indexed_custodies
@@ -446,11 +457,23 @@ async fn process_stream_message(
                                 .await
                                 .insert(new_position.custody, custody);
                             log::info!("  <> Fetched new custody {:#?} from RPC", new_position.custody);
-                            
-                            // Update the subscription request to include the new custody's price update v2 account
-                            // TODO
                         }
+
+                        // We need to update the subscriptions request to include the new position (and maybe the new custody's price update v2 account)
+                        subscriptions_update_required = true;
                     }
+                }
+
+                if msg.filters.contains(&"positions_close".to_owned()) {
+                    // Updates the indexed positions map
+                    update_indexed_positions(
+                        &account_key,
+                        &account_data,
+                        indexed_positions,
+                    )
+                    .await?;
+                    // We need to update the subscriptions request to remove the closed position
+                    subscriptions_update_required = true;
                 }
             }
             // log::debug!("new message: {msg:?}")
@@ -459,6 +482,22 @@ async fn process_stream_message(
             log::error!("error: {error:?}");
             return Err(error);
         }
+    }
+
+    // Update the subscriptions request if needed
+    if subscriptions_update_required {
+        log::info!("  <> Update subscriptions request");
+        let accounts_filter_map = generate_accounts_filter_map(&indexed_custodies, &indexed_positions).await;
+        let request = SubscribeRequest {
+            // ping: None,
+            accounts: accounts_filter_map,
+            // commitment: commitment.map(|c| c.into()),
+            ..Default::default()
+        };
+        subscribe_tx
+            .send(request)
+            .await
+            .map_err(|e| backoff::Error::transient(e.into()))?;
     }
     Ok(())
 }
@@ -646,7 +685,6 @@ pub async fn update_indexed_positions(
     position_account_data: &[u8],
     indexed_positions: &IndexedPositionsThreadSafe,
 ) -> Result<Option<Position>, backoff::Error<anyhow::Error>> {
-    log::info!(">>> Update on position: {:#?}", position_account_key);
     if position_account_data.is_empty() {
         log::info!("Position closed: {:#?}", position_account_key);
         indexed_positions
@@ -665,8 +703,11 @@ pub async fn update_indexed_positions(
         } else {
             log::info!("Position modified: {:#?}", position_account_key);
         }
+
         // Either way, update or create, this operation is the sames
         positions.insert(position_account_key.clone(), position);
+
+        // Return the new position if it was created, None if it was modified
         if is_new_position {
             return Ok(Some(position));
         } else {
@@ -704,5 +745,3 @@ async fn update_indexed_custodies(
 
     Ok(())
 }
-
-
