@@ -1,5 +1,5 @@
 use {
-    crate::utils::math,
+    adrena_abi::math,
     anyhow::{anyhow, Result},
 };
 

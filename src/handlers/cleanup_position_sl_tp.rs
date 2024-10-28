@@ -20,7 +20,7 @@ pub async fn cleanup_position(
     client: &Client<Arc<Keypair>>,
     median_priority_fee: u64,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
-    if position.pending_cleanup_and_close != 1 {
+    if !position.is_pending_cleanup_and_close() {
         return Ok(());
     }
 
