@@ -616,7 +616,6 @@ pub async fn evaluate_and_run_automated_orders(
     {
         let position_key = *position_key;
         let position = *position;
-        let oracle_price = oracle_price;
         let indexed_custodies = Arc::clone(indexed_custodies);
         let cortex = *cortex;
         let median_priority_fee = median_priority_fee;
@@ -792,7 +791,7 @@ pub async fn update_indexed_positions(
     if is_new_position {
         return Ok(PositionUpdate::Created(position));
     }
-    return Ok(PositionUpdate::Modified(position));
+    Ok(PositionUpdate::Modified(position))
 }
 
 // Update the indexed custodies map based on the indexed positions
