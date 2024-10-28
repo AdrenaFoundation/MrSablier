@@ -1,6 +1,8 @@
 use {
     adrena_abi::{
         main_pool::USDC_CUSTODY_ID,
+        oracle_price::OraclePrice,
+        pyth::PriceUpdateV2,
         types::{Cortex, Position},
         Side,
     },
@@ -15,7 +17,6 @@ use {
         cleanup_position_stop_loss, cleanup_position_take_profit,
         get_mean_prioritization_fee_by_percentile, GetRecentPrioritizationFeesByPercentileConfig,
     },
-    pyth::PriceUpdateV2,
     solana_client::rpc_filter::{Memcmp, RpcFilterType},
     solana_sdk::{pubkey::Pubkey, signature::Keypair},
     std::{
@@ -30,7 +31,6 @@ use {
         time::interval,
     },
     tonic::transport::channel::ClientTlsConfig,
-    utils::OraclePrice,
     yellowstone_grpc_client::{GeyserGrpcClient, Interceptor},
     yellowstone_grpc_proto::{
         geyser::{
@@ -54,7 +54,6 @@ type IndexedCustodiesThreadSafe = Arc<RwLock<HashMap<Pubkey, adrena_abi::types::
 pub const PYTH_RECEIVER_PROGRAM: &str = "rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ";
 
 pub mod handlers;
-pub mod pyth;
 pub mod utils;
 
 const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:10000";

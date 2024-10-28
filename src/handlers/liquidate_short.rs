@@ -1,10 +1,10 @@
 use {
     crate::{
-        handlers::create_liquidate_short_ix, utils, IndexedCustodiesThreadSafe,
-        LIQUIDATE_SHORT_CU_LIMIT,
+        handlers::create_liquidate_short_ix, IndexedCustodiesThreadSafe, LIQUIDATE_SHORT_CU_LIMIT,
     },
     adrena_abi::{
-        main_pool::USDC_CUSTODY_ID, types::Cortex, ADX_MINT, ALP_MINT,
+        liquidation_price::get_liquidation_price, main_pool::USDC_CUSTODY_ID,
+        oracle_price::OraclePrice, types::Cortex, Position, ADX_MINT, ALP_MINT,
         SPL_ASSOCIATED_TOKEN_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID,
     },
     anchor_client::Client,
@@ -15,8 +15,8 @@ use {
 
 pub async fn liquidate_short(
     position_key: &Pubkey,
-    position: &adrena_abi::types::Position,
-    oracle_price: &utils::oracle_price::OraclePrice,
+    position: &Position,
+    oracle_price: &OraclePrice,
     indexed_custodies: &IndexedCustodiesThreadSafe,
     client: &Client<Arc<Keypair>>,
     cortex: &Cortex,
@@ -31,12 +31,8 @@ pub async fn liquidate_short(
         .unwrap();
 
     // determine the liquidation price
-    let liquidation_price = adrena_abi::liquidation_price::get_liquidation_price(
-        position,
-        custody,
-        collateral_custody,
-        current_time,
-    )?;
+    let liquidation_price =
+        get_liquidation_price(position, custody, collateral_custody, current_time)?;
 
     // check if the price has crossed the liquidation price
     if oracle_price.price >= liquidation_price {
