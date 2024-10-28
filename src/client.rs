@@ -496,9 +496,6 @@ where
                                 "(pcu) Position pending cleanup and close: {:#?}",
                                 account_key
                             );
-                            // // We need to update the subscriptions request to include the modified position
-                            // subscriptions_update_required = true;
-
                             // Do the cleanup and close for the position in stasis
                             let client = Client::new(
                                 Cluster::Custom(endpoint.to_string(), endpoint.to_string()),
