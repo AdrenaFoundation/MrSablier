@@ -1,7 +1,7 @@
 use {
     crate::{
         handlers::create_liquidate_long_ix, utils, IndexedCustodiesThreadSafe,
-        CLOSE_POSITION_LONG_CU_LIMIT, LIQUIDATE_LONG_CU_LIMIT,
+        LIQUIDATE_LONG_CU_LIMIT,
     },
     adrena_abi::{
         main_pool::USDC_CUSTODY_ID, types::Cortex, ADX_MINT, ALP_MINT,
