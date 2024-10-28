@@ -434,17 +434,17 @@ where
                 // Each loop iteration we check if we need to update the subscription request based on what previously happened
 
                 if msg.filters.contains(&"price_feeds".to_owned()) {
-                    // evaluate_and_run_automated_orders(
-                    //     &account_key,
-                    //     &account_data,
-                    //     indexed_positions,
-                    //     indexed_custodies,
-                    //     payer,
-                    //     endpoint,
-                    //     cortex,
-                    //     median_priority_fee,
-                    // )
-                    // .await?;
+                    evaluate_and_run_automated_orders(
+                        &account_key,
+                        &account_data,
+                        indexed_positions,
+                        indexed_custodies,
+                        payer,
+                        endpoint,
+                        cortex,
+                        median_priority_fee,
+                    )
+                    .await?;
                     // No subscriptions update needed here as this will trigger the update in the next cycle for position change (and update filters there)
                 }
 
