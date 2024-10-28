@@ -1,6 +1,6 @@
 use {
     adrena_abi::{
-        main_pool::USDC_CUSTODY_ID, types::Cortex, ALP_MINT, SABLIER_THREAD_PROGRAM_ID,
+        main_pool::USDC_CUSTODY_ID, types::Cortex, ALP_MINT, CORTEX_ID, SABLIER_THREAD_PROGRAM_ID,
         SPL_TOKEN_PROGRAM_ID,
     },
     solana_sdk::pubkey::Pubkey,
@@ -36,7 +36,7 @@ pub fn create_close_position_long_ix(
         transfer_authority: transfer_authority_pda,
         lm_staking,
         lp_staking,
-        cortex: adrena_abi::pda::get_cortex_pda().0,
+        cortex: CORTEX_ID,
         pool: position.pool,
         position: *position_key,
         staking_reward_token_custody: USDC_CUSTODY_ID,
@@ -97,7 +97,7 @@ pub fn create_close_position_short_ix(
         transfer_authority: transfer_authority_pda,
         lm_staking,
         lp_staking,
-        cortex: adrena_abi::pda::get_cortex_pda().0,
+        cortex: CORTEX_ID,
         pool: position.pool,
         position: *position_key,
         staking_reward_token_custody: USDC_CUSTODY_ID,
@@ -123,6 +123,66 @@ pub fn create_close_position_short_ix(
         stop_loss_thread: position_stop_loss_pda,
         token_program: SPL_TOKEN_PROGRAM_ID,
         adrena_program: adrena_abi::ID,
+        sablier_program: SABLIER_THREAD_PROGRAM_ID,
+    };
+    (args, accounts)
+}
+
+pub fn create_cleanup_position_stop_loss_ix(
+    payer: &Pubkey,
+    position_key: &Pubkey,
+    owner: &Pubkey,
+    cortex_key: &Pubkey,
+    custody_key: &Pubkey,
+    pool_key: &Pubkey,
+    transfer_authority_pda: &Pubkey,
+    position_take_profit_pda: &Pubkey,
+    position_stop_loss_pda: &Pubkey,
+) -> (
+    adrena_abi::instruction::CleanupPositionStopLoss,
+    adrena_abi::accounts::CleanupPositionStopLoss,
+) {
+    let args = adrena_abi::instruction::CleanupPositionStopLoss {};
+    let accounts = adrena_abi::accounts::CleanupPositionStopLoss {
+        caller: *payer,
+        owner: *owner,
+        transfer_authority: *transfer_authority_pda,
+        cortex: *cortex_key,
+        pool: *pool_key,
+        position: *position_key,
+        custody: *custody_key,
+        stop_loss_thread: *position_stop_loss_pda,
+        take_profit_thread: *position_take_profit_pda,
+        sablier_program: SABLIER_THREAD_PROGRAM_ID,
+    };
+    (args, accounts)
+}
+
+pub fn create_cleanup_position_take_profit_ix(
+    payer: &Pubkey,
+    position_key: &Pubkey,
+    owner: &Pubkey,
+    cortex_key: &Pubkey,
+    custody_key: &Pubkey,
+    pool_key: &Pubkey,
+    transfer_authority_pda: &Pubkey,
+    position_take_profit_pda: &Pubkey,
+    position_stop_loss_pda: &Pubkey,
+) -> (
+    adrena_abi::instruction::CleanupPositionTakeProfit,
+    adrena_abi::accounts::CleanupPositionTakeProfit,
+) {
+    let args = adrena_abi::instruction::CleanupPositionTakeProfit {};
+    let accounts = adrena_abi::accounts::CleanupPositionTakeProfit {
+        caller: *payer,
+        owner: *owner,
+        transfer_authority: *transfer_authority_pda,
+        cortex: *cortex_key,
+        pool: *pool_key,
+        position: *position_key,
+        custody: *custody_key,
+        stop_loss_thread: *position_stop_loss_pda,
+        take_profit_thread: *position_take_profit_pda,
         sablier_program: SABLIER_THREAD_PROGRAM_ID,
     };
     (args, accounts)
