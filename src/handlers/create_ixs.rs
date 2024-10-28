@@ -20,13 +20,14 @@ pub fn create_close_position_long_ix(
     position_stop_loss_pda: Pubkey,
     staking_reward_token_custody: &adrena_abi::types::Custody,
     custody: &adrena_abi::types::Custody,
+    limit_price: u64,
 ) -> (
     adrena_abi::instruction::ClosePositionLong,
     adrena_abi::accounts::ClosePositionLong,
 ) {
     let args = adrena_abi::instruction::ClosePositionLong {
         params: adrena_abi::types::ClosePositionLongParams {
-            price: Some(position.stop_loss_close_position_price),
+            price: Some(limit_price),
         },
     };
     let accounts = adrena_abi::accounts::ClosePositionLong {
@@ -81,13 +82,14 @@ pub fn create_close_position_short_ix(
     staking_reward_token_custody: &adrena_abi::types::Custody,
     custody: &adrena_abi::types::Custody,
     collateral_custody: &adrena_abi::types::Custody,
+    limit_price: u64,
 ) -> (
     adrena_abi::instruction::ClosePositionShort,
     adrena_abi::accounts::ClosePositionShort,
 ) {
     let args = adrena_abi::instruction::ClosePositionShort {
         params: adrena_abi::types::ClosePositionShortParams {
-            price: Some(position.stop_loss_close_position_price),
+            price: Some(limit_price),
         },
     };
     let accounts = adrena_abi::accounts::ClosePositionShort {
