@@ -11,6 +11,7 @@ use {
     clap::Parser,
     futures::{channel::mpsc::SendError, Sink, SinkExt, StreamExt, TryFutureExt},
     handlers::{
+        cleanup_position_stop_loss, cleanup_position_take_profit,
         get_mean_prioritization_fee_by_percentile, GetRecentPrioritizationFeesByPercentileConfig,
     },
     pyth::PriceUpdateV2,
@@ -62,6 +63,7 @@ const MEAN_PRIORITY_FEE_PERCENTILE: u64 = 3000; // 30th
 const PRIORITY_FEE_REFRESH_INTERVAL: Duration = Duration::from_secs(5); // seconds
 pub const CLOSE_POSITION_LONG_CU_LIMIT: u32 = 380_000;
 pub const CLOSE_POSITION_SHORT_CU_LIMIT: u32 = 280_000;
+pub const CLEANUP_POSITION_CU_LIMIT: u32 = 60_000;
 
 #[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
 enum ArgsCommitment {
@@ -264,7 +266,7 @@ async fn main() -> anyhow::Result<()> {
 
             // Fetched once
             let cortex: Cortex = program
-                .account::<Cortex>(adrena_abi::pda::get_cortex_pda().0)
+                .account::<Cortex>(adrena_abi::CORTEX_ID)
                 .await
                 .map_err(|e| backoff::Error::transient(e.into()))?;
 
@@ -432,17 +434,17 @@ where
                 // Each loop iteration we check if we need to update the subscription request based on what previously happened
 
                 if msg.filters.contains(&"price_feeds".to_owned()) {
-                    check_liquidation_sl_tp_conditions(
-                        &account_key,
-                        &account_data,
-                        indexed_positions,
-                        indexed_custodies,
-                        payer,
-                        endpoint,
-                        cortex,
-                        median_priority_fee,
-                    )
-                    .await?;
+                    // evaluate_and_run_automated_orders(
+                    //     &account_key,
+                    //     &account_data,
+                    //     indexed_positions,
+                    //     indexed_custodies,
+                    //     payer,
+                    //     endpoint,
+                    //     cortex,
+                    //     median_priority_fee,
+                    // )
+                    // .await?;
                     // No subscriptions update needed here as this will trigger the update in the next cycle for position change (and update filters there)
                 }
 
@@ -489,14 +491,21 @@ where
                             // We need to update the subscriptions request to include the new position (and maybe the new custody's price update v2 account)
                             subscriptions_update_required = true;
                         }
-                        PositionUpdate::PendingCleanupAndClose(_position) => {
+                        PositionUpdate::PendingCleanupAndClose(position) => {
                             log::info!(
                                 "(pcu) Position pending cleanup and close: {:#?}",
                                 account_key
                             );
-                            // We need to update the subscriptions request to include the modified position
-                            subscriptions_update_required = true;
-                            // TODO: Call cleanup and close for position
+                            // // We need to update the subscriptions request to include the modified position
+                            // subscriptions_update_required = true;
+
+                            // Do the cleanup and close for the position in stasis
+                            let client = Client::new(
+                                Cluster::Custom(endpoint.to_string(), endpoint.to_string()),
+                                Arc::clone(payer),
+                            );
+                            cleanup_position(&account_key, &position, &client, median_priority_fee)
+                                .await?;
                         }
                         PositionUpdate::Modified(_position) => {
                             log::info!("(pcu) Position modified: {:#?}", account_key);
@@ -559,7 +568,7 @@ where
 // Check liquidation/sl/tp conditions for related positions
 // Based on the provided price_update_v2 account, check if any of the related positions have crossed their liquidation/sl/tp conditions
 // First go over the price update v2 account to get the price, then go over the indexed positions to check if any of them have crossed their conditions
-pub async fn check_liquidation_sl_tp_conditions(
+pub async fn evaluate_and_run_automated_orders(
     trade_oracle_key: &Pubkey,
     trade_oracle_data: &[u8],
     indexed_positions: &IndexedPositionsThreadSafe,
@@ -794,5 +803,27 @@ async fn update_indexed_custodies(
         indexed_custodies.write().await.insert(custody_key, custody);
     }
 
+    Ok(())
+}
+
+pub async fn cleanup_position(
+    position_key: &Pubkey,
+    position: &adrena_abi::types::Position,
+    client: &Client<Arc<Keypair>>,
+    median_priority_fee: u64,
+) -> Result<(), backoff::Error<anyhow::Error>> {
+    if position.take_profit_thread_is_set == 1 && position.stop_loss_thread_is_set == 1 {
+        handlers::cleanup_position_sl_tp::cleanup_position(
+            position_key,
+            position,
+            client,
+            median_priority_fee,
+        )
+        .await?;
+    } else if position.stop_loss_thread_is_set == 1 {
+        cleanup_position_stop_loss(position_key, position, client, median_priority_fee).await?;
+    } else if position.take_profit_thread_is_set == 1 {
+        cleanup_position_take_profit(position_key, position, client, median_priority_fee).await?;
+    }
     Ok(())
 }
