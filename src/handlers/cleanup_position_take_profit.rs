@@ -1,6 +1,7 @@
 use {
     crate::{
-        handlers::create_cleanup_position_take_profit_ix, utils::get_sablier_thread_pda, CLEANUP_POSITION_CU_LIMIT,
+        handlers::create_cleanup_position_take_profit_ix, utils::get_sablier_thread_pda,
+        CLEANUP_POSITION_CU_LIMIT,
     },
     anchor_client::Client,
     solana_client::rpc_config::RpcSendTransactionConfig,
@@ -14,7 +15,7 @@ pub async fn cleanup_position_take_profit(
     client: &Client<Arc<Keypair>>,
     median_priority_fee: u64,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
-    if position.pending_cleanup_and_close != 1 {
+    if !position.is_pending_cleanup_and_close() {
         return Ok(());
     }
 

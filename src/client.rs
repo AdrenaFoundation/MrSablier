@@ -2,6 +2,7 @@ use {
     adrena_abi::{
         main_pool::USDC_CUSTODY_ID,
         types::{Cortex, Position},
+        Side,
     },
     anchor_client::{
         anchor_lang::AccountDeserialize, solana_sdk::signer::keypair::read_keypair_file, Client,
@@ -64,6 +65,8 @@ const PRIORITY_FEE_REFRESH_INTERVAL: Duration = Duration::from_secs(5); // secon
 pub const CLOSE_POSITION_LONG_CU_LIMIT: u32 = 380_000;
 pub const CLOSE_POSITION_SHORT_CU_LIMIT: u32 = 280_000;
 pub const CLEANUP_POSITION_CU_LIMIT: u32 = 60_000;
+pub const LIQUIDATE_LONG_CU_LIMIT: u32 = 310_000;
+pub const LIQUIDATE_SHORT_CU_LIMIT: u32 = 210_000;
 
 #[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
 enum ArgsCommitment {
@@ -297,7 +300,7 @@ async fn main() -> anyhow::Result<()> {
 
                     // filter out the positions that are pending cleanup and close
                     existing_positions_accounts.retain(|(_, position)| {
-                        position.pending_cleanup_and_close == 0
+                        !position.is_pending_cleanup_and_close()
                     });
 
                     indexed_positions.extend(existing_positions_accounts);
@@ -609,7 +612,7 @@ pub async fn evaluate_and_run_automated_orders(
 
     for (position_key, position) in positions_shallow_clone
         .iter()
-        .filter(|(_, p)| p.custody == associated_custody_key && p.pending_cleanup_and_close == 0)
+        .filter(|(_, p)| p.custody == associated_custody_key && !p.is_pending_cleanup_and_close())
     {
         let position_key = *position_key;
         let position = *position;
@@ -624,12 +627,10 @@ pub async fn evaluate_and_run_automated_orders(
         );
         let task = tokio::spawn(async move {
             let result: Result<(), anyhow::Error> = async {
-                match position.side {
-                    1 => {
-                        /* LONG */
-
+                match position.get_side() {
+                    Side::Long => {
                         // Check SL
-                        if position.stop_loss_thread_is_set != 0 {
+                        if position.stop_loss_is_set() {
                             if let Err(e) = handlers::sl_long::sl_long(
                                 &position_key,
                                 &position,
@@ -646,7 +647,7 @@ pub async fn evaluate_and_run_automated_orders(
                         }
 
                         // Check TP
-                        if position.take_profit_thread_is_set != 0 {
+                        if position.take_profit_is_set() {
                             if let Err(e) = handlers::tp_long::tp_long(
                                 &position_key,
                                 &position,
@@ -663,14 +664,23 @@ pub async fn evaluate_and_run_automated_orders(
                         }
 
                         // Check LIQ
-                        // TODO : recalculate the liquidation price and check if the price has crossed it
-                        // log::warn!("TODO: check LIQ");
+                        if let Err(e) = handlers::liquidate_long::liquidate_long(
+                            &position_key,
+                            &position,
+                            &oracle_price,
+                            &indexed_custodies,
+                            &client,
+                            &cortex,
+                            median_priority_fee,
+                        )
+                        .await
+                        {
+                            log::error!("Error in liquidate_long: {}", e);
+                        }
                     }
-                    2 => {
-                        /* SHORT */
-
+                    Side::Short => {
                         // Check SL
-                        if position.stop_loss_thread_is_set != 0 {
+                        if position.stop_loss_is_set() {
                             if let Err(e) = handlers::sl_short::sl_short(
                                 &position_key,
                                 &position,
@@ -687,7 +697,7 @@ pub async fn evaluate_and_run_automated_orders(
                         }
 
                         // Check TP
-                        if position.take_profit_thread_is_set != 0 {
+                        if position.take_profit_is_set() {
                             if let Err(e) = handlers::tp_short::tp_short(
                                 &position_key,
                                 &position,
@@ -704,8 +714,19 @@ pub async fn evaluate_and_run_automated_orders(
                         }
 
                         // Check LIQ
-                        // TODO : recalculate the liquidation price and check if the price has crossed it
-                        // log::warn!("TODO: check LIQ");
+                        if let Err(e) = handlers::liquidate_short::liquidate_short(
+                            &position_key,
+                            &position,
+                            &oracle_price,
+                            &indexed_custodies,
+                            &client,
+                            &cortex,
+                            median_priority_fee,
+                        )
+                        .await
+                        {
+                            log::error!("Error in liquidate_short: {}", e);
+                        }
                     }
                     _ => {}
                 }
@@ -759,7 +780,7 @@ pub async fn update_indexed_positions(
             .map_err(|e| backoff::Error::transient(e.into()))?;
 
     // Special case - If Sablier race us for the Close/liquidate, we want to remove the position (if closed by sablier it will remain in cleanup and close mode)
-    if position.pending_cleanup_and_close == 1 {
+    if position.is_pending_cleanup_and_close() {
         indexed_positions.write().await.remove(position_account_key);
         return Ok(PositionUpdate::PendingCleanupAndClose(position));
     }
@@ -809,7 +830,7 @@ pub async fn cleanup_position(
     client: &Client<Arc<Keypair>>,
     median_priority_fee: u64,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
-    if position.take_profit_thread_is_set == 1 && position.stop_loss_thread_is_set == 1 {
+    if position.take_profit_is_set() && position.stop_loss_is_set() {
         handlers::cleanup_position_sl_tp::cleanup_position(
             position_key,
             position,
@@ -817,9 +838,9 @@ pub async fn cleanup_position(
             median_priority_fee,
         )
         .await?;
-    } else if position.stop_loss_thread_is_set == 1 {
+    } else if position.stop_loss_is_set() {
         cleanup_position_stop_loss(position_key, position, client, median_priority_fee).await?;
-    } else if position.take_profit_thread_is_set == 1 {
+    } else if position.take_profit_is_set() {
         cleanup_position_take_profit(position_key, position, client, median_priority_fee).await?;
     }
     Ok(())
