@@ -13,6 +13,20 @@ pub struct GetRecentPrioritizationFeesByPercentileConfig {
     pub locked_writable_accounts: Vec<Pubkey>,
 }
 
+pub async fn fetch_mean_priority_fee(
+    client: &Client<Arc<Keypair>>,
+    percentile: u64,
+) -> Result<u64, anyhow::Error> {
+    let config = GetRecentPrioritizationFeesByPercentileConfig {
+        percentile: Some(percentile),
+        fallback: false,
+        locked_writable_accounts: vec![], //adrena_abi::MAIN_POOL_ID, adrena_abi::CORTEX_ID],
+    };
+    get_mean_prioritization_fee_by_percentile(client, &config, None)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to fetch mean priority fee: {:?}", e))
+}
+
 pub async fn get_recent_prioritization_fees_by_percentile(
     client: &Client<Arc<Keypair>>,
     config: &GetRecentPrioritizationFeesByPercentileConfig,
@@ -48,30 +62,6 @@ pub async fn get_recent_prioritization_fees_by_percentile(
 
     Ok(recent_prioritization_fees)
 }
-
-// pub async fn get_median_prioritization_fee_by_percentile(
-//     client: &RpcClient,
-//     config: &GetRecentPrioritizationFeesByPercentileConfig,
-//     slots_to_return: Option<usize>,
-// ) -> Result<u64, Box<dyn Error>> {
-//     let mut recent_prioritization_fees =
-//         get_recent_prioritization_fees_by_percentile(client, config, slots_to_return).await?;
-
-//     recent_prioritization_fees.sort_by_key(|fee| fee.prioritization_fee);
-
-//     let half = recent_prioritization_fees.len() / 2;
-
-//     let median = if recent_prioritization_fees.len() % 2 == 0 {
-//         (recent_prioritization_fees[half - 1].prioritization_fee
-//             + recent_prioritization_fees[half].prioritization_fee
-//             + 1)
-//             / 2
-//     } else {
-//         recent_prioritization_fees[half].prioritization_fee
-//     };
-
-//     Ok(median)
-// }
 
 pub async fn get_mean_prioritization_fee_by_percentile(
     client: &Client<Arc<Keypair>>,
