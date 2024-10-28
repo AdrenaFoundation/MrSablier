@@ -99,6 +99,7 @@ pub async fn tp_short(
         staking_reward_token_custody,
         custody,
         collateral_custody,
+        position.take_profit_limit_price,
     );
 
     let tx = program

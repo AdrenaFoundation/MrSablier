@@ -99,6 +99,7 @@ pub async fn sl_long(
         position_stop_loss_pda,
         staking_reward_token_custody,
         custody,
+        position.stop_loss_limit_price,
     );
 
     let tx = program
