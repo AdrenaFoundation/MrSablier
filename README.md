@@ -1,8 +1,6 @@
 # MrSablier
 
-OpenSource GRPC rust client (Keeper) handling SL and TP for the adrena program.
-
-Liquidation to be added.
+OpenSource GRPC rust client (Keeper) handling Liquidation, SL and TP for the adrena program.
 
 See MrSablierStaking for the staking related counterpart.
 
