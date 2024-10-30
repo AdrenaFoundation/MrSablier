@@ -1,8 +1,6 @@
 use {
-    crate::{
-        handlers::create_cleanup_position_take_profit_ix, utils::get_sablier_thread_pda,
-        CLEANUP_POSITION_CU_LIMIT,
-    },
+    crate::{handlers::create_cleanup_position_take_profit_ix, CLEANUP_POSITION_CU_LIMIT},
+    adrena_abi::{get_sablier_thread_pda, AnchorSerialize},
     anchor_client::Client,
     solana_client::rpc_config::RpcSendTransactionConfig,
     solana_sdk::{compute_budget::ComputeBudgetInstruction, pubkey::Pubkey, signature::Keypair},
@@ -29,15 +27,15 @@ pub async fn cleanup_position_take_profit(
         .map_err(|e| backoff::Error::transient(e.into()))?;
 
     let transfer_authority_pda = adrena_abi::pda::get_transfer_authority_pda().0;
-    let position_take_profit_pda = get_sablier_thread_pda(
+    let (position_take_profit_pda, _) = get_sablier_thread_pda(
         &transfer_authority_pda,
-        position.take_profit_thread_id,
-        &position.owner,
+        position.take_profit_thread_id.try_to_vec().unwrap(),
+        Some(position.owner.try_to_vec().unwrap()),
     );
-    let position_stop_loss_pda = get_sablier_thread_pda(
+    let (position_stop_loss_pda, _) = get_sablier_thread_pda(
         &transfer_authority_pda,
-        position.stop_loss_thread_id,
-        &position.owner,
+        position.stop_loss_thread_id.try_to_vec().unwrap(),
+        Some(position.owner.try_to_vec().unwrap()),
     );
 
     let (cleanup_position_take_profit_ix, cleanup_position_take_profit_accounts) =

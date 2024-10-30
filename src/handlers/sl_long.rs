@@ -1,11 +1,12 @@
 use {
     crate::{
-        handlers::create_close_position_long_ix, utils, IndexedCustodiesThreadSafe,
+        handlers::create_close_position_long_ix, IndexedCustodiesThreadSafe,
         CLOSE_POSITION_LONG_CU_LIMIT,
     },
     adrena_abi::{
-        main_pool::USDC_CUSTODY_ID, types::Cortex, ADX_MINT, ALP_MINT,
-        SPL_ASSOCIATED_TOKEN_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID,
+        get_sablier_thread_pda, get_transfer_authority_pda, get_user_profile_pda,
+        main_pool::USDC_CUSTODY_ID, oracle_price::OraclePrice, types::Cortex, Position, ADX_MINT,
+        ALP_MINT, SPL_ASSOCIATED_TOKEN_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID,
     },
     anchor_client::Client,
     solana_client::rpc_config::RpcSendTransactionConfig,
@@ -15,8 +16,8 @@ use {
 
 pub async fn sl_long(
     position_key: &Pubkey,
-    position: &adrena_abi::types::Position,
-    oracle_price: &utils::oracle_price::OraclePrice,
+    position: &Position,
+    oracle_price: &OraclePrice,
     indexed_custodies: &IndexedCustodiesThreadSafe,
     client: &Client<Arc<Keypair>>,
     cortex: &Cortex,
@@ -55,7 +56,7 @@ pub async fn sl_long(
     )
     .0;
 
-    let user_profile_pda = adrena_abi::pda::get_user_profile_pda(&position.owner).0;
+    let user_profile_pda = get_user_profile_pda(&position.owner).0;
     // Fetch the user profile account
     let user_profile_account = program.rpc().get_account(&user_profile_pda).await.ok(); // Convert Result to Option, None if error
 
@@ -65,16 +66,16 @@ pub async fn sl_long(
         _ => None,
     };
 
-    let transfer_authority_pda = adrena_abi::pda::get_transfer_authority_pda().0;
+    let transfer_authority_pda = get_transfer_authority_pda().0;
 
-    let position_take_profit_pda = adrena_abi::pda::get_sablier_thread_pda(
+    let position_take_profit_pda = get_sablier_thread_pda(
         &transfer_authority_pda,
         position.take_profit_thread_id.to_le_bytes().to_vec(),
         Some(position.owner.to_bytes().to_vec()),
     )
     .0;
 
-    let position_stop_loss_pda = adrena_abi::pda::get_sablier_thread_pda(
+    let position_stop_loss_pda = get_sablier_thread_pda(
         &transfer_authority_pda,
         position.stop_loss_thread_id.to_le_bytes().to_vec(),
         Some(position.owner.to_bytes().to_vec()),

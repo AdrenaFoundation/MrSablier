@@ -1,11 +1,11 @@
 use {
     crate::{
-        handlers::create_ixs::create_close_position_short_ix, utils, IndexedCustodiesThreadSafe,
+        handlers::create_ixs::create_close_position_short_ix, IndexedCustodiesThreadSafe,
         CLOSE_POSITION_SHORT_CU_LIMIT,
     },
     adrena_abi::{
-        main_pool::USDC_CUSTODY_ID, types::Cortex, ADX_MINT, ALP_MINT,
-        SPL_ASSOCIATED_TOKEN_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID,
+        main_pool::USDC_CUSTODY_ID, oracle_price::OraclePrice, types::Cortex, Position, ADX_MINT,
+        ALP_MINT, SPL_ASSOCIATED_TOKEN_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID,
     },
     anchor_client::Client,
     solana_client::rpc_config::RpcSendTransactionConfig,
@@ -15,8 +15,8 @@ use {
 
 pub async fn sl_short(
     position_key: &Pubkey,
-    position: &adrena_abi::types::Position,
-    oracle_price: &utils::oracle_price::OraclePrice,
+    position: &Position,
+    oracle_price: &OraclePrice,
     indexed_custodies: &IndexedCustodiesThreadSafe,
     client: &Client<Arc<Keypair>>,
     cortex: &Cortex,
