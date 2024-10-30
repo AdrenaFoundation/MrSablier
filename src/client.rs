@@ -34,10 +34,21 @@ use {
     },
 };
 
+#[derive(Debug, Clone)]
+pub struct CachedLiquidationData {
+    // The oracle price of the asset
+    pub price: u64,
+    // The liquidation price of the position
+    pub liquidation_price: u64,
+    // The timestamp of the last update
+    pub last_updated: i64,
+}
+
 type AccountFilterMap = HashMap<String, SubscribeRequestFilterAccounts>;
 
 type IndexedPositionsThreadSafe = Arc<RwLock<HashMap<Pubkey, adrena_abi::types::Position>>>;
 type IndexedCustodiesThreadSafe = Arc<RwLock<HashMap<Pubkey, adrena_abi::types::Custody>>>;
+type LiquidationPriceCacheThreadSafe = Arc<RwLock<HashMap<Pubkey, CachedLiquidationData>>>;
 
 // https://solscan.io/account/rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ
 pub const PYTH_RECEIVER_PROGRAM: &str = "rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ";
@@ -59,6 +70,8 @@ pub const CLOSE_POSITION_SHORT_CU_LIMIT: u32 = 280_000;
 pub const CLEANUP_POSITION_CU_LIMIT: u32 = 60_000;
 pub const LIQUIDATE_LONG_CU_LIMIT: u32 = 310_000;
 pub const LIQUIDATE_SHORT_CU_LIMIT: u32 = 210_000;
+// How long to keep the liquidation price in the cache before recalculating it (in seconds)
+pub const MAX_LIQUIDATION_PRICE_CACHE_AGE: i64 = 60; // seconds
 
 #[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
 enum ArgsCommitment {
@@ -201,6 +214,9 @@ async fn main() -> anyhow::Result<()> {
     let indexed_positions: IndexedPositionsThreadSafe = Arc::new(RwLock::new(HashMap::new()));
     // The array of indexed custodies - These are not directly observed, but are needed for instructions and to keep track of which price update v2 accounts are observed
     let indexed_custodies: IndexedCustodiesThreadSafe = Arc::new(RwLock::new(HashMap::new()));
+    // The liquidation price cache
+    let liquidation_price_cache: LiquidationPriceCacheThreadSafe =
+        Arc::new(RwLock::new(HashMap::new()));
 
     // The default exponential backoff strategy intervals:
     // [500ms, 750ms, 1.125s, 1.6875s, 2.53125s, 3.796875s, 5.6953125s,
@@ -209,7 +225,8 @@ async fn main() -> anyhow::Result<()> {
         let args = args.clone();
         let zero_attempts = Arc::clone(&zero_attempts);
         let indexed_positions = Arc::clone(&indexed_positions);
-        let indexed_custodies = Arc::clone(&indexed_custodies);
+        let indexed_custodies = Arc::clone(&indexed_custodies); 
+        let liquidation_price_cache = Arc::clone(&liquidation_price_cache);
         let mut periodical_priority_fees_fetching_task: Option<JoinHandle<Result<(), backoff::Error<anyhow::Error>>>> = None;
 
         async move {
@@ -360,6 +377,7 @@ async fn main() -> anyhow::Result<()> {
                         message.map_err(|e| backoff::Error::transient(e.into())),
                         &indexed_positions,
                         &indexed_custodies,
+                        &liquidation_price_cache,
                         &payer,
                         &args.endpoint.clone(),
                         &cortex,

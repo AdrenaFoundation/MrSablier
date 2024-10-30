@@ -1,10 +1,11 @@
 use {
     crate::{
-        handlers::create_liquidate_short_ix, IndexedCustodiesThreadSafe, LIQUIDATE_SHORT_CU_LIMIT,
+        handlers::create_liquidate_short_ix, CachedLiquidationData, IndexedCustodiesThreadSafe,
+        LiquidationPriceCacheThreadSafe, LIQUIDATE_SHORT_CU_LIMIT, MAX_LIQUIDATION_PRICE_CACHE_AGE,
     },
     adrena_abi::{
         liquidation_price::get_liquidation_price, main_pool::USDC_CUSTODY_ID,
-        oracle_price::OraclePrice, types::Cortex, Position, ADX_MINT, ALP_MINT,
+        oracle_price::OraclePrice, types::Cortex, Custody, Position, ADX_MINT, ALP_MINT,
         SPL_ASSOCIATED_TOKEN_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID,
     },
     anchor_client::Client,
@@ -18,6 +19,7 @@ pub async fn liquidate_short(
     position: &Position,
     oracle_price: &OraclePrice,
     indexed_custodies: &IndexedCustodiesThreadSafe,
+    liquidation_price_cache: &LiquidationPriceCacheThreadSafe,
     client: &Client<Arc<Keypair>>,
     cortex: &Cortex,
     median_priority_fee: u64,
@@ -30,9 +32,33 @@ pub async fn liquidate_short(
         .get(&position.collateral_custody)
         .unwrap();
 
-    // determine the liquidation price
-    let liquidation_price =
-        get_liquidation_price(position, custody, collateral_custody, current_time)?;
+    // Determine liquidation price - Optimized with a cache
+    let liquidation_price = {
+        let cache = liquidation_price_cache.read().await;
+        let cached_data = cache.get(position_key).cloned();
+        drop(cache);
+
+        match cached_data {
+            Some(cached_data)
+                if should_use_cached_price(&cached_data, current_time, oracle_price) =>
+            {
+                cached_data.liquidation_price
+            }
+            _ => {
+                let new_price = calculate_and_update_cache(
+                    position_key,
+                    position,
+                    custody,
+                    collateral_custody,
+                    oracle_price,
+                    current_time,
+                    &liquidation_price_cache,
+                )
+                .await?;
+                new_price
+            }
+        }
+    };
 
     // check if the price has crossed the liquidation price
     if oracle_price.price >= liquidation_price {
@@ -157,4 +183,34 @@ pub async fn liquidate_short(
     // TODO wait for confirmation and retry if needed
 
     Ok(())
+}
+
+fn should_use_cached_price(
+    cached_data: &CachedLiquidationData,
+    current_time: i64,
+    oracle_price: &OraclePrice,
+) -> bool {
+    current_time - cached_data.last_updated < MAX_LIQUIDATION_PRICE_CACHE_AGE
+        || oracle_price.price > cached_data.price
+}
+
+async fn calculate_and_update_cache(
+    position_key: &Pubkey,
+    position: &Position,
+    custody: &Custody,
+    collateral_custody: &Custody,
+    oracle_price: &OraclePrice,
+    current_time: i64,
+    cache: &LiquidationPriceCacheThreadSafe,
+) -> Result<u64, anyhow::Error> {
+    let new_price = get_liquidation_price(position, custody, collateral_custody, current_time)?;
+    cache.write().await.insert(
+        *position_key,
+        CachedLiquidationData {
+            price: oracle_price.price,
+            liquidation_price: new_price,
+            last_updated: current_time,
+        },
+    );
+    Ok(new_price)
 }

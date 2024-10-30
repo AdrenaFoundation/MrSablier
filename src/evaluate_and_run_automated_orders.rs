@@ -1,7 +1,7 @@
 use {
     crate::{
         handlers::{self},
-        IndexedCustodiesThreadSafe, IndexedPositionsThreadSafe,
+        IndexedCustodiesThreadSafe, IndexedPositionsThreadSafe, LiquidationPriceCacheThreadSafe,
     },
     adrena_abi::{oracle_price::OraclePrice, pyth::PriceUpdateV2, types::Cortex, Side},
     anchor_client::{Client, Cluster},
@@ -17,6 +17,7 @@ pub async fn evaluate_and_run_automated_orders(
     trade_oracle_data: &[u8],
     indexed_positions: &IndexedPositionsThreadSafe,
     indexed_custodies: &IndexedCustodiesThreadSafe,
+    liquidation_price_cache: &LiquidationPriceCacheThreadSafe,
     payer: &Arc<Keypair>,
     endpoint: &str,
     cortex: &Cortex,
@@ -61,6 +62,7 @@ pub async fn evaluate_and_run_automated_orders(
         let position_key = *position_key;
         let position = *position;
         let indexed_custodies = Arc::clone(indexed_custodies);
+        let liquidation_price_cache = Arc::clone(liquidation_price_cache);
         let cortex = *cortex;
         let median_priority_fee = median_priority_fee;
 
@@ -73,7 +75,9 @@ pub async fn evaluate_and_run_automated_orders(
                 match position.get_side() {
                     Side::Long => {
                         // Check SL
-                        if position.stop_loss_is_set() && position.stop_loss_close_position_price != 0 {
+                        if position.stop_loss_is_set()
+                            && position.stop_loss_close_position_price != 0
+                        {
                             if let Err(e) = handlers::sl_long::sl_long(
                                 &position_key,
                                 &position,
@@ -112,6 +116,7 @@ pub async fn evaluate_and_run_automated_orders(
                             &position,
                             &oracle_price,
                             &indexed_custodies,
+                            &liquidation_price_cache,
                             &client,
                             &cortex,
                             median_priority_fee,
@@ -123,7 +128,9 @@ pub async fn evaluate_and_run_automated_orders(
                     }
                     Side::Short => {
                         // Check SL
-                        if position.stop_loss_is_set() && position.stop_loss_close_position_price != 0 {
+                        if position.stop_loss_is_set()
+                            && position.stop_loss_close_position_price != 0
+                        {
                             if let Err(e) = handlers::sl_short::sl_short(
                                 &position_key,
                                 &position,
@@ -157,19 +164,20 @@ pub async fn evaluate_and_run_automated_orders(
                         }
 
                         // Check LIQ
-                        if let Err(e) = handlers::liquidate_short::liquidate_short(
-                            &position_key,
-                            &position,
-                            &oracle_price,
-                            &indexed_custodies,
-                            &client,
-                            &cortex,
-                            median_priority_fee,
-                        )
-                        .await
-                        {
-                            log::error!("Error in liquidate_short: {}", e);
-                        }
+                        // if let Err(e) = handlers::liquidate_short::liquidate_short(
+                        //     &position_key,
+                        //     &position,
+                        //     &oracle_price,
+                        //     &indexed_custodies,
+                        //     &liquidation_price_cache,
+                        //     &client,
+                        //     &cortex,
+                        //     median_priority_fee,
+                        // )
+                        // .await
+                        // {
+                        //     log::error!("Error in liquidate_short: {}", e);
+                        // }
                     }
                     _ => {}
                 }
