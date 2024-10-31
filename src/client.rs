@@ -29,7 +29,7 @@ use {
         prelude::{
             subscribe_request_filter_accounts_filter::Filter as AccountsFilterDataOneof,
             subscribe_request_filter_accounts_filter_memcmp::Data as AccountsFilterMemcmpOneof,
-            CommitmentLevel, SubscribeRequestFilterAccounts,
+            CommitmentLevel, SubscribeRequestFilterAccounts, SubscribeRequestPing,
         },
     },
 };
@@ -301,7 +301,7 @@ async fn main() -> anyhow::Result<()> {
             log::info!("  <> Account filter map initialized");
             let (mut subscribe_tx, mut stream) = {
                 let request = SubscribeRequest {
-                    ping: None,
+                    ping: None,//Some(SubscribeRequestPing { id: 1 }),
                     accounts: accounts_filter_map,
                     commitment: commitment.map(|c| c.into()),
                     ..Default::default()
