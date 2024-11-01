@@ -7,7 +7,7 @@ use {
         IndexedCustodiesThreadSafe, IndexedPositionsThreadSafe,
     },
     adrena_abi::types::{Cortex, Position},
-    anchor_client::{Client, Cluster},
+    anchor_client::{Client, Cluster, Program},
     futures::{channel::mpsc::SendError, Sink, SinkExt},
     solana_sdk::{pubkey::Pubkey, signature::Keypair},
     std::sync::Arc,
@@ -37,6 +37,12 @@ where
     S: Sink<SubscribeRequest, Error = SendError> + Unpin,
 {
     let mut subscriptions_update_required = false;
+    let program = Client::new(
+        Cluster::Custom(endpoint.to_string(), endpoint.to_string()),
+        Arc::clone(payer),
+    )
+    .program(adrena_abi::ID)
+    .map_err(|e| backoff::Error::transient(e.into()))?;
 
     match message {
         Ok(msg) => {
@@ -81,14 +87,6 @@ where
                                     .await
                                     .contains_key(&new_position.custody)
                                 {
-                                    let client = Client::new(
-                                        Cluster::Custom(endpoint.to_string(), endpoint.to_string()),
-                                        Arc::clone(payer),
-                                    );
-                                    let program = client
-                                        .program(adrena_abi::ID)
-                                        .map_err(|e| backoff::Error::transient(e.into()))?;
-
                                     let custody = program
                                         .account::<adrena_abi::types::Custody>(new_position.custody)
                                         .await
@@ -114,14 +112,10 @@ where
                                     account_key
                                 );
                                 // Do the cleanup and close for the position in stasis
-                                let client = Client::new(
-                                    Cluster::Custom(endpoint.to_string(), endpoint.to_string()),
-                                    Arc::clone(payer),
-                                );
                                 cleanup_position(
                                     &account_key,
                                     &position,
-                                    &client,
+                                    &program,
                                     median_priority_fee,
                                 )
                                 .await?;
@@ -203,21 +197,21 @@ where
 pub async fn cleanup_position(
     position_key: &Pubkey,
     position: &adrena_abi::types::Position,
-    client: &Client<Arc<Keypair>>,
+    program: &Program<Arc<Keypair>>,
     median_priority_fee: u64,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
     if position.take_profit_is_set() && position.stop_loss_is_set() {
         handlers::cleanup_position_sl_tp::cleanup_position(
             position_key,
             position,
-            client,
+            program,
             median_priority_fee,
         )
         .await?;
     } else if position.stop_loss_is_set() {
-        cleanup_position_stop_loss(position_key, position, client, median_priority_fee).await?;
+        cleanup_position_stop_loss(position_key, position, program, median_priority_fee).await?;
     } else if position.take_profit_is_set() {
-        cleanup_position_take_profit(position_key, position, client, median_priority_fee).await?;
+        cleanup_position_take_profit(position_key, position, program, median_priority_fee).await?;
     }
     Ok(())
 }

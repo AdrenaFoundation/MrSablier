@@ -7,7 +7,7 @@ use {
         CLEANUP_POSITION_CU_LIMIT,
     },
     adrena_abi::{get_sablier_thread_pda, AnchorSerialize},
-    anchor_client::Client,
+    anchor_client::Program,
     solana_client::rpc_config::RpcSendTransactionConfig,
     solana_sdk::{compute_budget::ComputeBudgetInstruction, pubkey::Pubkey, signature::Keypair},
     std::sync::Arc,
@@ -17,7 +17,7 @@ use {
 pub async fn cleanup_position(
     position_key: &Pubkey,
     position: &adrena_abi::types::Position,
-    client: &Client<Arc<Keypair>>,
+    program: &Program<Arc<Keypair>>,
     median_priority_fee: u64,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
     if !position.is_pending_cleanup_and_close() {
@@ -25,10 +25,6 @@ pub async fn cleanup_position(
     }
 
     log::info!("Cleanup SL/TP for position {:#?}", position_key,);
-
-    let program = client
-        .program(adrena_abi::ID)
-        .map_err(|e| backoff::Error::transient(e.into()))?;
 
     let transfer_authority_pda = adrena_abi::pda::get_transfer_authority_pda().0;
     let (position_take_profit_pda, _) = get_sablier_thread_pda(

@@ -7,7 +7,7 @@ use {
         main_pool::USDC_CUSTODY_ID, oracle_price::OraclePrice, types::Cortex, Position, ADX_MINT,
         ALP_MINT, SPL_ASSOCIATED_TOKEN_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID,
     },
-    anchor_client::Client,
+    anchor_client::Program,
     solana_client::rpc_config::RpcSendTransactionConfig,
     solana_sdk::{compute_budget::ComputeBudgetInstruction, pubkey::Pubkey, signature::Keypair},
     std::sync::Arc,
@@ -18,7 +18,7 @@ pub async fn sl_short(
     position: &Position,
     oracle_price: &OraclePrice,
     indexed_custodies: &IndexedCustodiesThreadSafe,
-    client: &Client<Arc<Keypair>>,
+    program: &Program<Arc<Keypair>>,
     cortex: &Cortex,
     median_priority_fee: u64,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
@@ -32,9 +32,6 @@ pub async fn sl_short(
     } else {
         return Ok(());
     }
-    let program = client
-        .program(adrena_abi::ID)
-        .map_err(|e| backoff::Error::transient(e.into()))?;
 
     let indexed_custodies_read = indexed_custodies.read().await;
     let custody = indexed_custodies_read.get(&position.custody).unwrap();

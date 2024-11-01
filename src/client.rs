@@ -29,7 +29,7 @@ use {
         prelude::{
             subscribe_request_filter_accounts_filter::Filter as AccountsFilterDataOneof,
             subscribe_request_filter_accounts_filter_memcmp::Data as AccountsFilterMemcmpOneof,
-            CommitmentLevel, SubscribeRequestFilterAccounts, SubscribeRequestPing,
+            CommitmentLevel, SubscribeRequestFilterAccounts,
         },
     },
 };
