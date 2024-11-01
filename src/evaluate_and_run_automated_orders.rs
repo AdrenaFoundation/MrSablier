@@ -68,18 +68,24 @@ pub async fn evaluate_and_run_automated_orders(
             Cluster::Custom(endpoint.to_string(), endpoint.to_string()),
             Arc::clone(payer),
         );
+        let program = client
+            .program(adrena_abi::ID)
+            .map_err(|e| backoff::Error::transient(e.into()))?;
+
         let task = tokio::spawn(async move {
             let result: Result<(), anyhow::Error> = async {
                 match position.get_side() {
                     Side::Long => {
                         // Check SL
-                        if position.stop_loss_is_set() && position.stop_loss_close_position_price != 0 {
+                        if position.stop_loss_is_set()
+                            && position.stop_loss_close_position_price != 0
+                        {
                             if let Err(e) = handlers::sl_long::sl_long(
                                 &position_key,
                                 &position,
                                 &oracle_price,
                                 &indexed_custodies,
-                                &client,
+                                &program,
                                 &cortex,
                                 median_priority_fee,
                             )
@@ -96,7 +102,7 @@ pub async fn evaluate_and_run_automated_orders(
                                 &position,
                                 &oracle_price,
                                 &indexed_custodies,
-                                &client,
+                                &program,
                                 &cortex,
                                 median_priority_fee,
                             )
@@ -112,7 +118,7 @@ pub async fn evaluate_and_run_automated_orders(
                             &position,
                             &oracle_price,
                             &indexed_custodies,
-                            &client,
+                            &program,
                             &cortex,
                             median_priority_fee,
                         )
@@ -123,13 +129,15 @@ pub async fn evaluate_and_run_automated_orders(
                     }
                     Side::Short => {
                         // Check SL
-                        if position.stop_loss_is_set() && position.stop_loss_close_position_price != 0 {
+                        if position.stop_loss_is_set()
+                            && position.stop_loss_close_position_price != 0
+                        {
                             if let Err(e) = handlers::sl_short::sl_short(
                                 &position_key,
                                 &position,
                                 &oracle_price,
                                 &indexed_custodies,
-                                &client,
+                                &program,
                                 &cortex,
                                 median_priority_fee,
                             )
@@ -146,7 +154,7 @@ pub async fn evaluate_and_run_automated_orders(
                                 &position,
                                 &oracle_price,
                                 &indexed_custodies,
-                                &client,
+                                &program,
                                 &cortex,
                                 median_priority_fee,
                             )
@@ -162,7 +170,7 @@ pub async fn evaluate_and_run_automated_orders(
                             &position,
                             &oracle_price,
                             &indexed_custodies,
-                            &client,
+                            &program,
                             &cortex,
                             median_priority_fee,
                         )
