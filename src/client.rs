@@ -57,8 +57,8 @@ const PRIORITY_FEE_REFRESH_INTERVAL: Duration = Duration::from_secs(5); // secon
 pub const CLOSE_POSITION_LONG_CU_LIMIT: u32 = 380_000;
 pub const CLOSE_POSITION_SHORT_CU_LIMIT: u32 = 280_000;
 pub const CLEANUP_POSITION_CU_LIMIT: u32 = 60_000;
-pub const LIQUIDATE_LONG_CU_LIMIT: u32 = 310_000;
-pub const LIQUIDATE_SHORT_CU_LIMIT: u32 = 210_000;
+pub const LIQUIDATE_LONG_CU_LIMIT: u32 = 350_000;
+pub const LIQUIDATE_SHORT_CU_LIMIT: u32 = 250_000;
 
 #[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
 enum ArgsCommitment {
