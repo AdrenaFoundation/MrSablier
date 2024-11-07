@@ -29,11 +29,6 @@ pub async fn update_indexed_positions(
     let position = Position::try_deserialize(&mut &position_account_data[..])
         .map_err(|e| backoff::Error::transient(e.into()))?;
 
-    if position.is_pending_cleanup_and_close() {
-        positions.remove(position_account_key);
-        return Ok(PositionUpdate::PendingCleanupAndClose(position));
-    }
-
     let is_new_position = positions.insert(*position_account_key, position).is_none();
 
     if is_new_position {

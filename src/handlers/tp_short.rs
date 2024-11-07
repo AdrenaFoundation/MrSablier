@@ -64,20 +64,6 @@ pub async fn tp_short(
 
     let transfer_authority_pda = adrena_abi::pda::get_transfer_authority_pda().0;
 
-    let position_take_profit_pda = adrena_abi::pda::get_sablier_thread_pda(
-        &transfer_authority_pda,
-        position.take_profit_thread_id.to_le_bytes().to_vec(),
-        Some(position.owner.to_bytes().to_vec()),
-    )
-    .0;
-
-    let position_stop_loss_pda = adrena_abi::pda::get_sablier_thread_pda(
-        &transfer_authority_pda,
-        position.stop_loss_thread_id.to_le_bytes().to_vec(),
-        Some(position.owner.to_bytes().to_vec()),
-    )
-    .0;
-
     let lm_staking = adrena_abi::pda::get_staking_pda(&ADX_MINT).0;
     let lp_staking = adrena_abi::pda::get_staking_pda(&ALP_MINT).0;
 
@@ -91,8 +77,6 @@ pub async fn tp_short(
         lp_staking,
         cortex,
         user_profile,
-        position_take_profit_pda,
-        position_stop_loss_pda,
         staking_reward_token_custody,
         custody,
         collateral_custody,

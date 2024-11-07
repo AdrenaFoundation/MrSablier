@@ -1,13 +1,11 @@
 use {
     crate::{
         evaluate_and_run_automated_orders::evaluate_and_run_automated_orders,
-        generate_accounts_filter_map,
-        handlers::{self, cleanup_position_stop_loss, cleanup_position_take_profit},
-        update_indexes::update_indexed_positions,
+        generate_accounts_filter_map, update_indexes::update_indexed_positions,
         IndexedCustodiesThreadSafe, IndexedPositionsThreadSafe,
     },
     adrena_abi::types::{Cortex, Position},
-    anchor_client::{Client, Cluster, Program},
+    anchor_client::{Client, Cluster},
     futures::{channel::mpsc::SendError, Sink, SinkExt},
     solana_sdk::{pubkey::Pubkey, signature::Keypair},
     std::sync::Arc,
@@ -19,7 +17,6 @@ use {
 pub enum PositionUpdate {
     Created(Position),
     Modified(Position),
-    PendingCleanupAndClose(Position),
     Closed,
 }
 
@@ -106,20 +103,6 @@ where
                                 // We need to update the subscriptions request to include the new position (and maybe the new custody's price update v2 account)
                                 subscriptions_update_required = true;
                             }
-                            PositionUpdate::PendingCleanupAndClose(position) => {
-                                log::info!(
-                                    "(pcu) Position pending cleanup and close: {:#?}",
-                                    account_key
-                                );
-                                // Do the cleanup and close for the position in stasis
-                                cleanup_position(
-                                    &account_key,
-                                    &position,
-                                    &program,
-                                    median_priority_fee,
-                                )
-                                .await?;
-                            }
                             PositionUpdate::Modified(_position) => {
                                 log::info!("(pcu) Position modified: {:#?}", account_key);
                             }
@@ -142,9 +125,6 @@ where
                                 panic!("New position created in positions_close filter");
                             }
                             PositionUpdate::Modified(_) => {
-                                panic!("New position created in positions_close filter");
-                            }
-                            PositionUpdate::PendingCleanupAndClose(_) => {
                                 panic!("New position created in positions_close filter");
                             }
                             PositionUpdate::Closed => {
@@ -190,28 +170,6 @@ where
             .send(request)
             .await
             .map_err(|e| backoff::Error::transient(e.into()))?;
-    }
-    Ok(())
-}
-
-pub async fn cleanup_position(
-    position_key: &Pubkey,
-    position: &adrena_abi::types::Position,
-    program: &Program<Arc<Keypair>>,
-    median_priority_fee: u64,
-) -> Result<(), backoff::Error<anyhow::Error>> {
-    if position.take_profit_is_set() && position.stop_loss_is_set() {
-        handlers::cleanup_position_sl_tp::cleanup_position(
-            position_key,
-            position,
-            program,
-            median_priority_fee,
-        )
-        .await?;
-    } else if position.stop_loss_is_set() {
-        cleanup_position_stop_loss(position_key, position, program, median_priority_fee).await?;
-    } else if position.take_profit_is_set() {
-        cleanup_position_take_profit(position_key, position, program, median_priority_fee).await?;
     }
     Ok(())
 }
