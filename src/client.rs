@@ -267,20 +267,12 @@ async fn main() -> anyhow::Result<()> {
                     &get_position_anchor_discriminator(),
                 ));
                 let filters = vec![position_pda_filter];
-                let mut existing_positions_accounts = program
+                let existing_positions_accounts = program
                     .accounts::<Position>(filters)
                     .await
                     .map_err(|e| backoff::Error::transient(e.into()))?;
-                {
-                    let mut indexed_positions = indexed_positions.write().await;
-
-                    // filter out the positions that are pending cleanup and close
-                    existing_positions_accounts.retain(|(_, position)| {
-                        !position.is_pending_cleanup_and_close()
-                    });
-
-                    indexed_positions.extend(existing_positions_accounts);
-                }
+                // Extend the indexed positions map with the existing positions
+                indexed_positions.write().await.extend(existing_positions_accounts);
                 log::info!(
                     "  <> # of existing positions parsed and loaded: {}",
                     indexed_positions.read().await.len()

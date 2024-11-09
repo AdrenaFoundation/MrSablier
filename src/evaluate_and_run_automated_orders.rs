@@ -56,7 +56,7 @@ pub async fn evaluate_and_run_automated_orders(
 
     for (position_key, position) in positions_shallow_clone
         .iter()
-        .filter(|(_, p)| p.custody == associated_custody_key && !p.is_pending_cleanup_and_close())
+        .filter(|(_, p)| p.custody == associated_custody_key)
     {
         let position_key = *position_key;
         let position = *position;
