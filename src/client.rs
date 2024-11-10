@@ -373,7 +373,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
 
-            // log::info!("  <> stream closed");
+            log::debug!("  <> stream closed");
 
             Ok::<(), backoff::Error<anyhow::Error>>(())
         }

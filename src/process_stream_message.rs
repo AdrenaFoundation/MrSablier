@@ -111,7 +111,7 @@ where
                             }
                         }
                     }
-                    /* Else if is important as we only want to end up here if the message is not about a  positions_create_update*/
+                    /* Else if is important as we only want to end up here if the message is not about a  positions_create_update */
                     else if msg.filters.contains(&"positions_close".to_owned()) {
                         // Updates the indexed positions map
                         let update = update_indexed_positions(
@@ -136,6 +136,7 @@ where
                     }
                 }
                 Some(UpdateOneof::Ping(_)) => {
+                    log::debug!("  <> Received ping message");
                     // This is necessary to keep load balancers that expect client pings alive. If your load balancer doesn't
                     // require periodic client pings then this is unnecessary
                     subscribe_tx
@@ -163,7 +164,6 @@ where
         let request = SubscribeRequest {
             ping: None, //Some(SubscribeRequestPing { id: 1 }),
             accounts: accounts_filter_map,
-            // commitment: commitment.map(|c| c.into()),
             ..Default::default()
         };
         subscribe_tx
