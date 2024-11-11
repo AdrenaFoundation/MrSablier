@@ -17,7 +17,7 @@ use {
     tokio::{
         sync::{Mutex, RwLock},
         task::JoinHandle,
-        time::interval,
+        time::{interval, timeout},
     },
     tonic::transport::channel::ClientTlsConfig,
     yellowstone_grpc_client::{GeyserGrpcClient, Interceptor},
@@ -347,28 +347,38 @@ async fn main() -> anyhow::Result<()> {
             // ////////////////////////////////////////////////////////////////
             log::info!("4 - Start core loop: processing gRPC stream...");
             loop {
-                if let Some(message) = stream.next().await {
-                    match process_stream_message(
-                        message.map_err(|e| backoff::Error::transient(e.into())),
-                        &indexed_positions,
-                        &indexed_custodies,
-                        &payer,
-                        &args.endpoint.clone(),
-                        &cortex,
-                        &mut subscribe_tx,
-                        *median_priority_fee.lock().await,
-                    )
-                    .await
-                    {
-                        Ok(_) => continue,
-                        Err(backoff::Error::Permanent(e)) => {
-                            log::error!("Permanent error: {:?}", e);
-                            break;
+                match timeout(Duration::from_secs(11), stream.next()).await {
+                    Ok(Some(message)) => {
+                        match process_stream_message(
+                            message.map_err(|e| backoff::Error::transient(e.into())),
+                            &indexed_positions,
+                            &indexed_custodies,
+                            &payer,
+                            &args.endpoint.clone(),
+                            &cortex,
+                            &mut subscribe_tx,
+                            *median_priority_fee.lock().await,
+                        )
+                        .await
+                        {
+                            Ok(_) => continue,
+                            Err(backoff::Error::Permanent(e)) => {
+                                log::error!("Permanent error: {:?}", e);
+                                break;
+                            }
+                            Err(backoff::Error::Transient { err, .. }) => {
+                                log::warn!("Transient error: {:?}", err);
+                                // Handle transient error without breaking the loop
+                            }
                         }
-                        Err(backoff::Error::Transient { err, .. }) => {
-                            log::warn!("Transient error: {:?}", err);
-                            // Handle transient error without breaking the loop
-                        }
+                    }
+                    Ok(None) => {
+                        log::warn!("Stream closed by server");
+                        break;
+                    }
+                    Err(_) => {
+                        log::warn!("No message received in 11 seconds, restarting connection (we should be getting at least a ping every 10 seconds)");
+                        return Err(backoff::Error::transient(anyhow::anyhow!("Timeout")));
                     }
                 }
             }
