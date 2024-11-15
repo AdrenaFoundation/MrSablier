@@ -26,7 +26,7 @@ pub async fn sl_long(
     // check if the price has crossed the SL
     if oracle_price.price <= position.stop_loss_limit_price {
         log::info!(
-            "SL condition met for LONG position {:#?} - Price: {}",
+            "   <*> SL condition met for LONG position {:#?} - Price: {}",
             position_key,
             oracle_price.price
         );
@@ -55,7 +55,7 @@ pub async fn sl_long(
 
     let user_profile_pda = get_user_profile_pda(&position.owner).0;
     // Fetch the user profile account
-    let user_profile_account = program.rpc().get_account(&user_profile_pda).await.ok(); // Convert Result to Option, None if error
+    let user_profile_account = program.rpc().get_account(&user_profile_pda).await.ok();
 
     // Check if the user profile exists (owned by the Adrena program)
     let user_profile = match user_profile_account {
@@ -95,7 +95,7 @@ pub async fn sl_long(
         .signed_transaction()
         .await
         .map_err(|e| {
-            log::error!("Transaction generation failed with error: {:?}", e);
+            log::error!("   <> Transaction generation failed with error: {:?}", e);
             backoff::Error::transient(e.into())
         })?;
 
@@ -112,12 +112,12 @@ pub async fn sl_long(
         )
         .await
         .map_err(|e| {
-            log::error!("Transaction sending failed with error: {:?}", e);
+            log::error!("   <> Transaction sending failed with error: {:?}", e);
             backoff::Error::transient(e.into())
         })?;
 
     log::info!(
-        "SL Long for position {:#?} - TX sent: {:#?}",
+        "   <> SL Long for position {:#?} - TX sent: {:#?}",
         position_key,
         tx_hash.to_string(),
     );

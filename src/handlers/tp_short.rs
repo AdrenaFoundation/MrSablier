@@ -25,7 +25,7 @@ pub async fn tp_short(
     // check if the price has crossed the TP
     if oracle_price.price <= position.take_profit_limit_price {
         log::info!(
-            "TP condition met for SHORT position {:#?} - Price: {}",
+            "   <*> TP condition met for SHORT position {:#?} - Price: {}",
             position_key,
             oracle_price.price
         );
@@ -96,7 +96,7 @@ pub async fn tp_short(
         .signed_transaction()
         .await
         .map_err(|e| {
-            log::error!("Transaction generation failed with error: {:?}", e);
+            log::error!("   <> Transaction generation failed with error: {:?}", e);
             backoff::Error::transient(e.into())
         })?;
 
@@ -113,12 +113,12 @@ pub async fn tp_short(
         )
         .await
         .map_err(|e| {
-            log::error!("Transaction sending failed with error: {:?}", e);
+            log::error!("   <> Transaction sending failed with error: {:?}", e);
             backoff::Error::transient(e.into())
         })?;
 
     log::info!(
-        "TP Short for position {:#?} - TX sent: {:#?}",
+        "   <> TP Short for position {:#?} - TX sent: {:#?}",
         position_key,
         tx_hash.to_string(),
     );

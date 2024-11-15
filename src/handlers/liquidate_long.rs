@@ -4,12 +4,15 @@ use {
     },
     adrena_abi::{
         liquidation_price::get_liquidation_price, main_pool::USDC_CUSTODY_ID,
-        oracle_price::OraclePrice, types::Cortex, Position, ADX_MINT, ALP_MINT,
+        oracle_price::OraclePrice, types::Cortex, Custody, Position, ADX_MINT, ALP_MINT,
         SPL_ASSOCIATED_TOKEN_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID,
     },
     anchor_client::Program,
     solana_client::rpc_config::RpcSendTransactionConfig,
-    solana_sdk::{compute_budget::ComputeBudgetInstruction, pubkey::Pubkey, signature::Keypair},
+    solana_sdk::{
+        compute_budget::ComputeBudgetInstruction, pubkey::Pubkey, signature::Keypair,
+        transaction::Transaction,
+    },
     std::sync::Arc,
 };
 
@@ -33,7 +36,7 @@ pub async fn liquidate_long(
     // check if the price has crossed the liquidation price
     if oracle_price.price <= liquidation_price {
         log::info!(
-            "Liquidation condition met for LONG position {:#?} - Oracle Price: {}, Liquidation Price: {}",
+            "   <*> Liquidation condition met for LONG position {:#?} - Oracle Price: {}, Liquidation Price: {}",
             position_key,
             oracle_price.price,
             liquidation_price
@@ -71,10 +74,119 @@ pub async fn liquidate_long(
         _ => None,
     };
 
+    let rpc_client = program.rpc();
     let transfer_authority_pda = adrena_abi::pda::get_transfer_authority_pda().0;
     let lm_staking = adrena_abi::pda::get_staking_pda(&ADX_MINT).0;
     let lp_staking = adrena_abi::pda::get_staking_pda(&ALP_MINT).0;
 
+    // Simulate the transaction to get the CU consumed (and check if liquidation is possible, as the calculations are slightly different)
+    // The backend base the liquidation on the position leverage, not the liquidation price
+    let tx_simulation = create_liquidate_long_transaction(
+        program,
+        position_key,
+        position,
+        receiving_account,
+        transfer_authority_pda,
+        lm_staking,
+        lp_staking,
+        cortex,
+        user_profile,
+        staking_reward_token_custody,
+        custody,
+        median_priority_fee,
+        LIQUIDATE_LONG_CU_LIMIT as u64,
+    )
+    .await?;
+
+    let mut simulation_attempts = 0;
+    let simulation = loop {
+        match rpc_client.simulate_transaction(&tx_simulation).await {
+            Ok(simulation) => break simulation,
+            Err(e) => {
+                if e.to_string().contains("BlockhashNotFound") {
+                    simulation_attempts += 1;
+                    log::warn!(
+                        "   <> Simulation attempt {} failed with error: {:?} - Retrying...",
+                        simulation_attempts,
+                        e
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+                    if simulation_attempts >= 25 {
+                        return Err(backoff::Error::transient(e.into()));
+                    }
+                }
+                // If it's not a blockhash not found, we continue it's treated later
+            }
+        }
+    };
+
+    let simulated_cu = simulation.value.units_consumed.unwrap_or(0);
+
+    if simulated_cu == 0 {
+        log::warn!(
+            "   <> CU consumed: {} - Simulation failed (possibly not liquidable yet(skip)",
+            simulated_cu
+        );
+        return Ok(());
+    }
+
+    // Create the actual transaction with the refined CU limit
+    let tx = create_liquidate_long_transaction(
+        program,
+        position_key,
+        position,
+        receiving_account,
+        transfer_authority_pda,
+        lm_staking,
+        lp_staking,
+        cortex,
+        user_profile,
+        staking_reward_token_custody,
+        custody,
+        median_priority_fee,
+        (simulated_cu as f64 * 1.02) as u64, // +2% for any jitter due to find_pda calls
+    )
+    .await?;
+
+    let tx_hash = rpc_client
+        .send_transaction_with_config(
+            &tx,
+            RpcSendTransactionConfig {
+                skip_preflight: true,
+                max_retries: Some(0),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|e| {
+            log::error!("   <> Transaction sending failed with error: {:?}", e);
+            backoff::Error::transient(e.into())
+        })?;
+
+    log::info!(
+        "   <> Liquidated Long position {:#?} - TX sent: {:#?}",
+        position_key,
+        tx_hash.to_string(),
+    );
+
+    Ok(())
+}
+
+async fn create_liquidate_long_transaction(
+    program: &Program<Arc<Keypair>>,
+    position_key: &Pubkey,
+    position: &Position,
+    receiving_account: Pubkey,
+    transfer_authority_pda: Pubkey,
+    lm_staking: Pubkey,
+    lp_staking: Pubkey,
+    cortex: &Cortex,
+    user_profile: Option<Pubkey>,
+    staking_reward_token_custody: &Custody,
+    custody: &Custody,
+    median_priority_fee: u64,
+    simulated_cu: u64,
+) -> Result<Transaction, backoff::Error<anyhow::Error>> {
     let (liquidate_long_ix, liquidate_long_accounts) = create_liquidate_long_ix(
         &program.payer(),
         position_key,
@@ -89,47 +201,20 @@ pub async fn liquidate_long(
         custody,
     );
 
-    let tx = program
+    program
         .request()
         .instruction(ComputeBudgetInstruction::set_compute_unit_price(
             median_priority_fee,
         ))
         .instruction(ComputeBudgetInstruction::set_compute_unit_limit(
-            LIQUIDATE_LONG_CU_LIMIT,
+            (simulated_cu as f64 * 1.02) as u32, // +2% for any jitter due to find_pda calls
         ))
         .args(liquidate_long_ix)
         .accounts(liquidate_long_accounts)
         .signed_transaction()
         .await
         .map_err(|e| {
-            log::error!("Transaction generation failed with error: {:?}", e);
+            log::error!("   <> Transaction generation failed with error: {:?}", e);
             backoff::Error::transient(e.into())
-        })?;
-
-    let rpc_client = program.rpc();
-
-    let tx_hash = rpc_client
-        .send_transaction_with_config(
-            &tx,
-            RpcSendTransactionConfig {
-                skip_preflight: true,
-                max_retries: Some(0),
-                ..Default::default()
-            },
-        )
-        .await
-        .map_err(|e| {
-            log::error!("Transaction sending failed with error: {:?}", e);
-            backoff::Error::transient(e.into())
-        })?;
-
-    log::info!(
-        "Liquidated Long position {:#?} - TX sent: {:#?}",
-        position_key,
-        tx_hash.to_string(),
-    );
-
-    // TODO wait for confirmation and retry if needed
-
-    Ok(())
+        })
 }
