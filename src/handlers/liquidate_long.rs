@@ -114,8 +114,18 @@ pub async fn liquidate_long(
                     if simulation_attempts >= 25 {
                         return Err(backoff::Error::transient(e.into()));
                     }
+                } else if e.to_string().contains("AccountOwnedByWrongProgram") {
+                    // This means the position has already been liquidated by another instance
+
+                    log::info!(
+                        "   <> Position {:#?} has already been liquidated by another instance - Skipping",
+                        position_key
+                    );
+                    return Ok(());
+                } else {
+                    log::error!("   <> Simulation failed with error: {:?}", e);
+                    return Ok(());
                 }
-                // If it's not a blockhash not found, we continue it's treated later
             }
         }
     };
