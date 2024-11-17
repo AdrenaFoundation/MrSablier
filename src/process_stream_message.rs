@@ -4,7 +4,10 @@ use {
         generate_accounts_filter_map, update_indexes::update_indexed_positions,
         IndexedCustodiesThreadSafe, IndexedPositionsThreadSafe,
     },
-    adrena_abi::types::{Cortex, Position},
+    adrena_abi::{
+        types::{Cortex, Position},
+        Pool,
+    },
     anchor_client::{Client, Cluster},
     futures::{channel::mpsc::SendError, Sink, SinkExt},
     solana_sdk::{pubkey::Pubkey, signature::Keypair},
@@ -27,6 +30,7 @@ pub async fn process_stream_message<S>(
     payer: &Arc<Keypair>,
     endpoint: &str,
     cortex: &Cortex,
+    pool: &Pool,
     subscribe_tx: &mut S,
     median_priority_fee: u64,
 ) -> Result<(), backoff::Error<anyhow::Error>>
@@ -59,6 +63,7 @@ where
                             payer,
                             endpoint,
                             cortex,
+                            pool,
                             median_priority_fee,
                         )
                         .await?;
