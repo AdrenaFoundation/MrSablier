@@ -3,9 +3,8 @@ use {
         handlers::create_liquidate_short_ix, IndexedCustodiesThreadSafe, LIQUIDATE_SHORT_CU_LIMIT,
     },
     adrena_abi::{
-        liquidation_price::get_liquidation_price, main_pool::USDC_CUSTODY_ID,
-        oracle_price::OraclePrice, types::Cortex, Position, ADX_MINT, ALP_MINT,
-        SPL_ASSOCIATED_TOKEN_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID,
+        main_pool::USDC_CUSTODY_ID, oracle_price::OraclePrice, types::Cortex, LeverageCheckStatus,
+        Pool, Position, ADX_MINT, ALP_MINT, SPL_ASSOCIATED_TOKEN_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID,
     },
     anchor_client::Program,
     solana_client::rpc_config::RpcSendTransactionConfig,
@@ -20,6 +19,7 @@ pub async fn liquidate_short(
     indexed_custodies: &IndexedCustodiesThreadSafe,
     program: &Program<Arc<Keypair>>,
     cortex: &Cortex,
+    pool: &Pool,
     median_priority_fee: u64,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
     let current_time = chrono::Utc::now().timestamp();
@@ -31,20 +31,41 @@ pub async fn liquidate_short(
         .unwrap();
 
     // determine the liquidation price
-    let liquidation_price =
-        get_liquidation_price(position, custody, collateral_custody, current_time)?;
+    // let liquidation_price =
+    //     get_liquidation_price(position, custody, collateral_custody, current_time)?;
+    let position_leverage_status = pool.check_leverage(
+        &position,
+        &oracle_price,
+        &custody,
+        &oracle_price,
+        &collateral_custody,
+        current_time,
+        false,
+    )?;
 
-    // check if the price has crossed the liquidation price
-    if oracle_price.price >= liquidation_price {
-        log::info!(
-            "Liquidation condition met for SHORT position {:#?} - Oracle Price: {}, Liquidation Price: {}",
-            position_key,
-            oracle_price.price,
-            liquidation_price
-        );
-    } else {
-        return Ok(());
-    }
+    match position_leverage_status {
+        LeverageCheckStatus::Ok(leverage) => {
+            if leverage > 2_500_000 {
+                // 250x
+                log::info!(
+                    "  <*> Position {} nearing liquidation: {}",
+                    position_key,
+                    leverage
+                );
+                return Ok(());
+            }
+            // Silently return if leverage is below
+            return Ok(());
+        }
+        LeverageCheckStatus::MaxLeverageExceeded(leverage) => {
+            log::info!(
+                "  <*> Liquidation condition met for SHORT position {:#?} - Oracle Price: {}, Position Leverage: {}",
+                position_key,
+                oracle_price.price,
+                leverage
+            );
+        }
+    };
 
     let indexed_custodies_read = indexed_custodies.read().await;
     let custody = indexed_custodies_read.get(&position.custody).unwrap();
@@ -107,7 +128,7 @@ pub async fn liquidate_short(
         .signed_transaction()
         .await
         .map_err(|e| {
-            log::error!("Transaction generation failed with error: {:?}", e);
+            log::error!("  <> Transaction generation failed with error: {:?}", e);
             backoff::Error::transient(e.into())
         })?;
 
@@ -124,12 +145,12 @@ pub async fn liquidate_short(
         )
         .await
         .map_err(|e| {
-            log::error!("Transaction sending failed with error: {:?}", e);
+            log::error!("  <> Transaction sending failed with error: {:?}", e);
             backoff::Error::transient(e.into())
         })?;
 
     log::info!(
-        "Liquidated Short position {:#?} - TX sent: {:#?}",
+        "  <> Liquidated Short position {:#?} - TX sent: {:#?}",
         position_key,
         tx_hash.to_string(),
     );

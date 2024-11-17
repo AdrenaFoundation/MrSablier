@@ -25,7 +25,7 @@ pub async fn tp_long(
     // check if the price has crossed the TP
     if oracle_price.price >= position.take_profit_limit_price {
         log::info!(
-            "TP condition met for LONG position {:#?} - Price: {}",
+            "  <*> TP condition met for LONG position {:#?} - Price: {}",
             position_key,
             oracle_price.price
         );
@@ -94,7 +94,7 @@ pub async fn tp_long(
         .signed_transaction()
         .await
         .map_err(|e| {
-            log::error!("Transaction generation failed with error: {:?}", e);
+            log::error!("  <> Transaction generation failed with error: {:?}", e);
             backoff::Error::transient(e.into())
         })?;
 
@@ -111,12 +111,12 @@ pub async fn tp_long(
         )
         .await
         .map_err(|e| {
-            log::error!("Transaction sending failed with error: {:?}", e);
+            log::error!("  <> Transaction sending failed with error: {:?}", e);
             backoff::Error::transient(e.into())
         })?;
 
     log::info!(
-        "TP Long for position {:#?} - TX sent: {:#?}",
+        "  <> TP Long for position {:#?} - TX sent: {:#?}",
         position_key,
         tx_hash.to_string(),
     );

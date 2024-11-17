@@ -25,7 +25,7 @@ pub async fn sl_short(
     // check if the price has crossed the SL
     if oracle_price.price >= position.stop_loss_limit_price {
         log::info!(
-            "SL condition met for SHORT position {:#?} - Price: {}",
+            "  <*> SL condition met for SHORT position {:#?} - Price: {}",
             position_key,
             oracle_price.price
         );
@@ -95,7 +95,7 @@ pub async fn sl_short(
         .signed_transaction()
         .await
         .map_err(|e| {
-            log::error!("Transaction generation failed with error: {:?}", e);
+            log::error!("  <> Transaction generation failed with error: {:?}", e);
             backoff::Error::transient(e.into())
         })?;
 
@@ -112,12 +112,12 @@ pub async fn sl_short(
         )
         .await
         .map_err(|e| {
-            log::error!("Transaction sending failed with error: {:?}", e);
+            log::error!("  <> Transaction sending failed with error: {:?}", e);
             backoff::Error::transient(e.into())
         })?;
 
     log::info!(
-        "SL Short for position {:#?} - TX sent: {:#?}",
+        "  <> SL Short for position {:#?} - TX sent: {:#?}",
         position_key,
         tx_hash.to_string(),
     );
