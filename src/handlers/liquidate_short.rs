@@ -30,14 +30,14 @@ pub async fn liquidate_short(
         .get(&position.collateral_custody)
         .unwrap();
 
-    // determine the liquidation price
-    // let liquidation_price =
-    //     get_liquidation_price(position, custody, collateral_custody, current_time)?;
+    // here we use the USDC price of 1 for simplicity
+    let mock_collateral_token_price = OraclePrice::new(1_000_000, -6, 0);
+
     let position_leverage_status = pool.check_leverage(
         &position,
         &oracle_price,
         &custody,
-        &oracle_price,
+        &mock_collateral_token_price,
         &collateral_custody,
         current_time,
         false,
