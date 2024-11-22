@@ -3,7 +3,7 @@ use {
         handlers::{self},
         IndexedCustodiesThreadSafe, IndexedPositionsThreadSafe,
     },
-    adrena_abi::{oracle_price::OraclePrice, pyth::PriceUpdateV2, types::Cortex, Side},
+    adrena_abi::{oracle_price::OraclePrice, pyth::PriceUpdateV2, types::Cortex, Pool, Side},
     anchor_client::{Client, Cluster},
     solana_sdk::{pubkey::Pubkey, signature::Keypair},
     std::sync::Arc,
@@ -20,6 +20,7 @@ pub async fn evaluate_and_run_automated_orders(
     payer: &Arc<Keypair>,
     endpoint: &str,
     cortex: &Cortex,
+    pool: &Pool,
     median_priority_fee: u64,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
     // Deserialize price update v2 account
@@ -62,6 +63,7 @@ pub async fn evaluate_and_run_automated_orders(
         let position = *position;
         let indexed_custodies = Arc::clone(indexed_custodies);
         let cortex = *cortex;
+        let pool = *pool;
         let median_priority_fee = median_priority_fee;
 
         let client = Client::new(
@@ -120,6 +122,7 @@ pub async fn evaluate_and_run_automated_orders(
                             &indexed_custodies,
                             &program,
                             &cortex,
+                            &pool,
                             median_priority_fee,
                         )
                         .await
@@ -172,6 +175,7 @@ pub async fn evaluate_and_run_automated_orders(
                             &indexed_custodies,
                             &program,
                             &cortex,
+                            &pool,
                             median_priority_fee,
                         )
                         .await

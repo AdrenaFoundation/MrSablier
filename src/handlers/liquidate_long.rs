@@ -23,6 +23,7 @@ pub async fn liquidate_long(
     indexed_custodies: &IndexedCustodiesThreadSafe,
     program: &Program<Arc<Keypair>>,
     cortex: &Cortex,
+    pool: &Pool,
     median_priority_fee: u64,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
     let current_time = chrono::Utc::now().timestamp();
@@ -31,19 +32,39 @@ pub async fn liquidate_long(
     let custody = indexed_custodies_read.get(&position.custody).unwrap();
 
     // determine the liquidation price
-    let liquidation_price = get_liquidation_price(position, custody, custody, current_time)?;
+    let position_leverage_status = pool.check_leverage(
+        &position,
+        &oracle_price,
+        &custody,
+        &oracle_price,
+        &custody,
+        current_time,
+        false,
+    )?;
 
-    // check if the price has crossed the liquidation price
-    if oracle_price.price <= liquidation_price {
-        log::info!(
-            "   <*> Liquidation condition met for LONG position {:#?} - Oracle Price: {}, Liquidation Price: {}",
-            position_key,
-            oracle_price.price,
-            liquidation_price
+    match position_leverage_status {
+        LeverageCheckStatus::Ok(leverage) => {
+            if leverage > 2_500_000 {
+                // 250x
+                log::info!(
+                    "  <*> Position {} nearing liquidation: {}",
+                    position_key,
+                    leverage
+                );
+                return Ok(());
+            }
+            // Silently return if leverage is below
+            return Ok(());
+        }
+        LeverageCheckStatus::MaxLeverageExceeded(leverage) => {
+            log::info!(
+                "  <*> Liquidation condition met for LONG position {:#?} - Oracle Price: {}, Position Leverage: {}",
+                position_key,
+                oracle_price.price,
+                leverage
         );
-    } else {
-        return Ok(());
-    }
+        }
+    };
 
     let indexed_custodies_read = indexed_custodies.read().await;
     let custody = indexed_custodies_read.get(&position.custody).unwrap();

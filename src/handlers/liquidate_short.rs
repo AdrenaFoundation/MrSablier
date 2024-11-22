@@ -23,6 +23,7 @@ pub async fn liquidate_short(
     indexed_custodies: &IndexedCustodiesThreadSafe,
     program: &Program<Arc<Keypair>>,
     cortex: &Cortex,
+    pool: &Pool,
     median_priority_fee: u64,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
     let current_time = chrono::Utc::now().timestamp();
@@ -33,21 +34,42 @@ pub async fn liquidate_short(
         .get(&position.collateral_custody)
         .unwrap();
 
-    // determine the liquidation price
-    let liquidation_price =
-        get_liquidation_price(position, custody, collateral_custody, current_time)?;
+    // here we use the USDC price of 1 for simplicity
+    let mock_collateral_token_price = OraclePrice::new(1_000_000, -6, 0);
 
-    // check if the price has crossed the liquidation price
-    if oracle_price.price >= liquidation_price {
-        log::info!(
-            "   <*> Liquidation condition met for SHORT position {:#?} - Oracle Price: {}, Liquidation Price: {}",
-            position_key,
-            oracle_price.price,
-            liquidation_price
-        );
-    } else {
-        return Ok(());
-    }
+    let position_leverage_status = pool.check_leverage(
+        &position,
+        &oracle_price,
+        &custody,
+        &mock_collateral_token_price,
+        &collateral_custody,
+        current_time,
+        false,
+    )?;
+
+    match position_leverage_status {
+        LeverageCheckStatus::Ok(leverage) => {
+            if leverage > 2_500_000 {
+                // 250x
+                log::info!(
+                    "  <*> Position {} nearing liquidation: {}",
+                    position_key,
+                    leverage
+                );
+                return Ok(());
+            }
+            // Silently return if leverage is below
+            return Ok(());
+        }
+        LeverageCheckStatus::MaxLeverageExceeded(leverage) => {
+            log::info!(
+                "  <*> Liquidation condition met for SHORT position {:#?} - Oracle Price: {}, Position Leverage: {}",
+                position_key,
+                oracle_price.price,
+                leverage
+            );
+        }
+    };
 
     let indexed_custodies_read = indexed_custodies.read().await;
     let custody = indexed_custodies_read.get(&position.custody).unwrap();

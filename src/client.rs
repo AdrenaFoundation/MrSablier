@@ -5,6 +5,7 @@ use {
     adrena_abi::{
         main_pool::USDC_CUSTODY_ID,
         types::{Cortex, Position},
+        Pool,
     },
     anchor_client::{solana_sdk::signer::keypair::read_keypair_file, Client, Cluster},
     backoff::{future::retry, ExponentialBackoff},
@@ -249,6 +250,12 @@ async fn main() -> anyhow::Result<()> {
                 .await
                 .map_err(|e| backoff::Error::transient(e.into()))?;
 
+            // Fetched once
+            let pool = program
+                .account::<Pool>(adrena_abi::MAIN_POOL_ID)
+                .await
+                .map_err(|e| backoff::Error::transient(e.into()))?;
+
             // Index USDC custody once
             let usdc_custody = program
                 .account::<adrena_abi::types::Custody>(USDC_CUSTODY_ID)
@@ -356,6 +363,7 @@ async fn main() -> anyhow::Result<()> {
                             &payer,
                             &args.endpoint.clone(),
                             &cortex,
+                            &pool,
                             &mut subscribe_tx,
                             *median_priority_fee.lock().await,
                         )
