@@ -100,6 +100,14 @@ pub async fn sl_long(
                     if simulation_attempts >= 25 {
                         return Err(backoff::Error::transient(e.into()));
                     }
+                } else if e.to_string().contains("AccountOwnedByWrongProgram") {
+                    // This means the position has already been closed by another instance
+
+                    log::info!(
+                        "   <> Position {:#?} has already been closed by another instance - Skipping",
+                        position_key
+                    );
+                    return Ok(());
                 } else {
                     log::error!("   <> Simulation failed with error: {:?}", e);
                     return Ok(());
