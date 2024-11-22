@@ -39,7 +39,7 @@ pub async fn liquidate_long(
         &custody,
         &oracle_price,
         &custody,
-        current_time,
+        Utc::now().timestamp(),
         false,
     )?;
 
