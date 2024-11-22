@@ -96,7 +96,6 @@ pub async fn liquidate_long(
         _ => None,
     };
 
-    let rpc_client = program.rpc();
     let transfer_authority_pda = adrena_abi::pda::get_transfer_authority_pda().0;
     let lm_staking = adrena_abi::pda::get_staking_pda(&ADX_MINT).0;
     let lp_staking = adrena_abi::pda::get_staking_pda(&ALP_MINT).0;
@@ -120,6 +119,7 @@ pub async fn liquidate_long(
     )
     .await?;
 
+    let rpc_client = program.rpc();
     let mut simulation_attempts = 0;
     let simulation = loop {
         match rpc_client.simulate_transaction(&tx_simulation).await {
