@@ -8,6 +8,7 @@ use {
         SPL_TOKEN_PROGRAM_ID,
     },
     anchor_client::Program,
+    chrono::Utc,
     solana_client::rpc_config::RpcSendTransactionConfig,
     solana_sdk::{
         compute_budget::ComputeBudgetInstruction, pubkey::Pubkey, signature::Keypair,
@@ -26,7 +27,7 @@ pub async fn liquidate_short(
     pool: &Pool,
     median_priority_fee: u64,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
-    let current_time = chrono::Utc::now().timestamp();
+    let start_time = Utc::now();
 
     let indexed_custodies_read = indexed_custodies.read().await;
     let custody = indexed_custodies_read.get(&position.custody).unwrap();
@@ -43,7 +44,7 @@ pub async fn liquidate_short(
         &custody,
         &mock_collateral_token_price,
         &collateral_custody,
-        current_time,
+        Utc::now().timestamp(),
         false,
     )?;
 
@@ -201,10 +202,13 @@ pub async fn liquidate_short(
             backoff::Error::transient(e.into())
         })?;
 
+    let end_time = Utc::now();
+    let duration = end_time - start_time;
     log::info!(
-        "   <> Liquidated Short position {:#?} - TX sent: {:#?}",
+        "   <> Liquidated Short position {:#?} - TX sent: {:#?} - (Took: {} ms)",
         position_key,
         tx_hash.to_string(),
+        duration.num_milliseconds()
     );
 
     Ok(())
