@@ -55,6 +55,7 @@ where
                     // Each loop iteration we check if we need to update the subscription request based on what previously happened
 
                     if msg.filters.contains(&"price_feeds".to_owned()) {
+                        // let start = std::time::Instant::now();
                         evaluate_and_run_automated_orders(
                             &account_key,
                             &account_data,
@@ -67,6 +68,10 @@ where
                             median_priority_fee,
                         )
                         .await?;
+                        // log::info!(
+                        //     "   <*> evaluate_and_run_automated_orders took {:?}",
+                        //     start.elapsed()
+                        // );
                         // No subscriptions update needed here as this will trigger the update in the next cycle for position change (and update filters there)
                     }
 
