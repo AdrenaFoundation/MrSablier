@@ -1,8 +1,5 @@
 use {
-    crate::{
-        handlers::create_close_position_long_ix, IndexedCustodiesThreadSafe,
-        CLOSE_POSITION_LONG_CU_LIMIT,
-    },
+    crate::{handlers::create_close_position_long_ix, IndexedCustodiesThreadSafe},
     adrena_abi::{
         main_pool::USDC_CUSTODY_ID, oracle_price::OraclePrice, types::Cortex, Custody, Position,
         ADX_MINT, ALP_MINT, SPL_ASSOCIATED_TOKEN_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID,
@@ -82,7 +79,7 @@ pub async fn tp_long(
         staking_reward_token_custody,
         custody,
         median_priority_fee,
-        CLOSE_POSITION_LONG_CU_LIMIT as u64,
+        500_000,
     )
     .await?;
 
@@ -141,7 +138,7 @@ pub async fn tp_long(
         staking_reward_token_custody,
         custody,
         median_priority_fee,
-        (simulated_cu as f64 * 1.02) as u64,
+        (simulated_cu as f64 * 1.05) as u64,
     )
     .await?;
 
