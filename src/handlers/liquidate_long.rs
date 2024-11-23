@@ -203,6 +203,14 @@ pub async fn liquidate_long(
         duration.num_milliseconds()
     );
 
+    if duration.num_milliseconds() > 150 {
+        log::warn!(
+            "   <> TOOK too long to liquidate LONG position {:#?} - ({} ms)",
+            position_key,
+            duration.num_milliseconds()
+        );
+    }
+
     Ok(())
 }
 

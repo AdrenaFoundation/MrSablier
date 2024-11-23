@@ -1,15 +1,12 @@
 use {
-    crate::{handlers::create_ixs::create_close_position_short_ix, IndexedCustodiesThreadSafe},
+    crate::{handlers::sl_short::create_close_position_short_tx, IndexedCustodiesThreadSafe},
     adrena_abi::{
-        main_pool::USDC_CUSTODY_ID, oracle_price::OraclePrice, types::Cortex, Custody, Position,
-        ADX_MINT, ALP_MINT, SPL_ASSOCIATED_TOKEN_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID,
+        main_pool::USDC_CUSTODY_ID, oracle_price::OraclePrice, types::Cortex, Position, ADX_MINT,
+        ALP_MINT, SPL_ASSOCIATED_TOKEN_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID,
     },
     anchor_client::Program,
     solana_client::rpc_config::RpcSendTransactionConfig,
-    solana_sdk::{
-        compute_budget::ComputeBudgetInstruction, pubkey::Pubkey, signature::Keypair,
-        transaction::Transaction,
-    },
+    solana_sdk::{pubkey::Pubkey, signature::Keypair},
     std::sync::Arc,
 };
 
@@ -22,8 +19,7 @@ pub async fn tp_short(
     cortex: &Cortex,
     median_priority_fee: u64,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
-    // check if the price has crossed the TP
-    if oracle_price.price <= position.take_profit_limit_price {
+    if position.take_profit_reached(oracle_price.price) {
         log::info!(
             "   <*> TP condition met for SHORT position {:#?} - Price: {}",
             position_key,
@@ -67,7 +63,7 @@ pub async fn tp_short(
     let lm_staking = adrena_abi::pda::get_staking_pda(&ADX_MINT).0;
     let lp_staking = adrena_abi::pda::get_staking_pda(&ALP_MINT).0;
 
-    let tx_simulation = create_tp_short_transaction(
+    let tx_simulation = create_close_position_short_tx(
         program,
         position_key,
         position,
@@ -127,7 +123,7 @@ pub async fn tp_short(
         return Ok(());
     }
 
-    let tx = create_tp_short_transaction(
+    let tx = create_close_position_short_tx(
         program,
         position_key,
         position,
@@ -141,7 +137,7 @@ pub async fn tp_short(
         custody,
         collateral_custody,
         median_priority_fee,
-        (simulated_cu as f64 * 1.05) as u64,
+        (simulated_cu as f64 * 1.05) as u32,
     )
     .await?;
 
@@ -167,54 +163,4 @@ pub async fn tp_short(
     );
 
     Ok(())
-}
-
-async fn create_tp_short_transaction(
-    program: &Program<Arc<Keypair>>,
-    position_key: &Pubkey,
-    position: &Position,
-    receiving_account: Pubkey,
-    transfer_authority_pda: Pubkey,
-    lm_staking: Pubkey,
-    lp_staking: Pubkey,
-    cortex: &Cortex,
-    user_profile: Option<Pubkey>,
-    staking_reward_token_custody: &Custody,
-    custody: &Custody,
-    collateral_custody: &Custody,
-    median_priority_fee: u64,
-    simulated_cu: u64,
-) -> Result<Transaction, backoff::Error<anyhow::Error>> {
-    let (close_position_short_ix, close_position_short_accounts) = create_close_position_short_ix(
-        &program.payer(),
-        position_key,
-        position,
-        receiving_account,
-        transfer_authority_pda,
-        lm_staking,
-        lp_staking,
-        cortex,
-        user_profile,
-        staking_reward_token_custody,
-        custody,
-        collateral_custody,
-        position.take_profit_limit_price,
-    );
-
-    program
-        .request()
-        .instruction(ComputeBudgetInstruction::set_compute_unit_price(
-            median_priority_fee,
-        ))
-        .instruction(ComputeBudgetInstruction::set_compute_unit_limit(
-            (simulated_cu as f64 * 1.02) as u32,
-        ))
-        .args(close_position_short_ix)
-        .accounts(close_position_short_accounts)
-        .signed_transaction()
-        .await
-        .map_err(|e| {
-            log::error!("   <> Transaction generation failed with error: {:?}", e);
-            backoff::Error::transient(e.into())
-        })
 }

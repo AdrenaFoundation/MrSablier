@@ -23,8 +23,7 @@ pub async fn sl_long(
     cortex: &Cortex,
     median_priority_fee: u64,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
-    // check if the price has crossed the SL
-    if oracle_price.price <= position.stop_loss_limit_price {
+    if position.stop_loss_reached(oracle_price.price) {
         log::info!(
             "   <*> SL condition met for LONG position {:#?} - Price: {}",
             position_key,
@@ -67,7 +66,7 @@ pub async fn sl_long(
     let lm_staking = adrena_abi::pda::get_staking_pda(&ADX_MINT).0;
     let lp_staking = adrena_abi::pda::get_staking_pda(&ALP_MINT).0;
 
-    let tx_simulation = create_sl_long_transaction(
+    let tx_simulation = create_close_position_long_tx(
         program,
         position_key,
         position,
@@ -126,7 +125,7 @@ pub async fn sl_long(
         return Ok(());
     }
 
-    let tx = create_sl_long_transaction(
+    let tx = create_close_position_long_tx(
         program,
         position_key,
         position,
@@ -139,7 +138,7 @@ pub async fn sl_long(
         staking_reward_token_custody,
         custody,
         median_priority_fee,
-        (simulated_cu as f64 * 1.05) as u64,
+        (simulated_cu as f64 * 1.05) as u32,
     )
     .await?;
 
@@ -169,7 +168,7 @@ pub async fn sl_long(
     Ok(())
 }
 
-async fn create_sl_long_transaction(
+pub async fn create_close_position_long_tx(
     program: &Program<Arc<Keypair>>,
     position_key: &Pubkey,
     position: &Position,
@@ -182,7 +181,7 @@ async fn create_sl_long_transaction(
     staking_reward_token_custody: &Custody,
     custody: &Custody,
     median_priority_fee: u64,
-    simulated_cu: u64,
+    computing_units: u32,
 ) -> Result<Transaction, backoff::Error<anyhow::Error>> {
     let (close_position_long_params, close_position_long_accounts) = create_close_position_long_ix(
         &program.payer(),
@@ -205,7 +204,7 @@ async fn create_sl_long_transaction(
             median_priority_fee,
         ))
         .instruction(ComputeBudgetInstruction::set_compute_unit_limit(
-            (simulated_cu as f64 * 1.02) as u32,
+            computing_units,
         ))
         .args(close_position_long_params)
         .accounts(close_position_long_accounts)

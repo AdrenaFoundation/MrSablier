@@ -210,6 +210,14 @@ pub async fn liquidate_short(
         duration.num_milliseconds()
     );
 
+    if duration.num_milliseconds() > 150 {
+        log::warn!(
+            "   <> TOOK too long to liquidate SHORT position {:#?} - ({} ms)",
+            position_key,
+            duration.num_milliseconds()
+        );
+    }
+
     Ok(())
 }
 
