@@ -23,8 +23,7 @@ pub async fn sl_long(
     cortex: &Cortex,
     median_priority_fee: u64,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
-    // check if the price has crossed the SL
-    if oracle_price.price <= position.stop_loss_limit_price {
+    if position.stop_loss_reached(oracle_price.price) {
         log::info!(
             "  <*> SL condition met for LONG position {:#?} - Price: {}",
             position_key,
