@@ -9,6 +9,7 @@ use {
     anchor_client::Program,
     solana_client::rpc_config::RpcSendTransactionConfig,
     solana_sdk::{compute_budget::ComputeBudgetInstruction, pubkey::Pubkey, signature::Keypair},
+    spl_associated_token_account::instruction::create_associated_token_account_idempotent,
     std::sync::Arc,
 };
 
@@ -122,6 +123,12 @@ pub async fn liquidate_short(
         ))
         .instruction(ComputeBudgetInstruction::set_compute_unit_limit(
             LIQUIDATE_SHORT_CU_LIMIT,
+        ))
+        .instruction(create_associated_token_account_idempotent(
+            &program.payer(),
+            &position.owner,
+            &collateral_mint,
+            &SPL_TOKEN_PROGRAM_ID,
         ))
         .args(liquidate_short_ix)
         .accounts(liquidate_short_accounts)
