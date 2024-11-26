@@ -34,6 +34,15 @@ pub async fn sl_long(
         return Ok(());
     }
 
+    // check stop loss slippage is below 1% else return
+    if !position.stop_loss_slippage_ok(oracle_price.price) {
+        log::info!(
+            "  <*> SL Long for position {:#?} - Price: {}",
+            position_key,
+            oracle_price.price
+        );
+    }
+
     let indexed_custodies_read = indexed_custodies.read().await;
     let custody = indexed_custodies_read.get(&position.custody).unwrap();
     let collateral_custody = indexed_custodies_read
