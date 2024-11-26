@@ -10,6 +10,7 @@ use {
     anchor_client::Program,
     solana_client::rpc_config::RpcSendTransactionConfig,
     solana_sdk::{compute_budget::ComputeBudgetInstruction, pubkey::Pubkey, signature::Keypair},
+    spl_associated_token_account::instruction::create_associated_token_account_idempotent,
     std::sync::Arc,
 };
 
@@ -87,6 +88,12 @@ pub async fn tp_long(
         ))
         .instruction(ComputeBudgetInstruction::set_compute_unit_limit(
             CLOSE_POSITION_LONG_CU_LIMIT,
+        ))
+        .instruction(create_associated_token_account_idempotent(
+            &program.payer(),
+            &position.owner,
+            &collateral_mint,
+            &SPL_TOKEN_PROGRAM_ID,
         ))
         .args(close_position_long_ix)
         .accounts(close_position_long_accounts)
