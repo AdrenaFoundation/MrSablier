@@ -4,8 +4,11 @@
         "Bfgwp",
         "borsh",
         "chrono",
+        "codegen",
+        "dalek",
         "Datasize",
         "grpf",
+        "maplit",
         "nonblocking",
         "Oneof",
         "pdas",
@@ -14,6 +17,7 @@
         "pubkeys",
         "pyth",
         "sablier",
+        "serde",
         "thiserror",
         "Zeroable"
     ]
