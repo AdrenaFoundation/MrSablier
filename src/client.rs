@@ -160,6 +160,7 @@ async fn generate_accounts_filter_map(
             account: vec![],
             owner: position_owner,
             filters: vec![position_filter_discriminator],
+            nonempty_txn_signature: None,
         },
     );
 
@@ -170,6 +171,7 @@ async fn generate_accounts_filter_map(
             account: existing_positions_keys,
             owner: vec![],
             filters: vec![],
+            nonempty_txn_signature: None,
         },
     );
 
@@ -181,6 +183,7 @@ async fn generate_accounts_filter_map(
             account: trade_oracle_keys,
             owner: price_feed_owner,
             filters: vec![],
+            nonempty_txn_signature: None,
         },
     );
 
