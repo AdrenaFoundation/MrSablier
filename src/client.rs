@@ -385,7 +385,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                     Ok(None) => {
                         log::warn!("Stream closed by server - restarting connection");
-                        break;
+                        return Err(backoff::Error::transient(anyhow::anyhow!("Server Closed Connection")));
                     }
                     Err(_) => {
                         log::warn!("No message received in 11 seconds, restarting connection (we should be getting at least a ping every 10 seconds)");
