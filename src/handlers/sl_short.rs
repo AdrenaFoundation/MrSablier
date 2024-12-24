@@ -24,11 +24,7 @@ pub async fn sl_short(
     median_priority_fee: u64,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
     if position.stop_loss_reached(oracle_price.price) {
-        log::info!(
-            "  <*> SL condition met for SHORT position {:#?} - Price: {}",
-            position_key,
-            oracle_price.price
-        );
+        // no op
     } else {
         return Ok(());
     }
@@ -36,10 +32,17 @@ pub async fn sl_short(
     // check stop loss slippage is below 1% else return
     if !position.stop_loss_slippage_ok(oracle_price.price) {
         log::info!(
-            "  <*> SL Short for position {:#?} - Price: {}",
+            "  <*> SL condition met for SHORT position {:#?} - Price: {}",
             position_key,
             oracle_price.price
         );
+    } else {
+        log::info!(
+            "  <*> SL condition met for SHORT position {:#?} - But price isn't within slippage range: {}",
+            position_key,
+            oracle_price.price
+        );
+        return Ok(());
     }
 
     let indexed_custodies_read = indexed_custodies.read().await;
