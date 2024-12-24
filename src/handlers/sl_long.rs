@@ -31,7 +31,7 @@ pub async fn sl_long(
     }
 
     // check stop loss slippage is below 1% else return
-    if !position.stop_loss_slippage_ok(oracle_price.price) {
+    if position.stop_loss_slippage_ok(oracle_price.price) {
         log::info!(
             "  <*> SL condition met for LONG position {:#?} - Price: {}",
             position_key,
