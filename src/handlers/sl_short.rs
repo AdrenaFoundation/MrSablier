@@ -1,7 +1,10 @@
 use {
     crate::{
-        handlers::create_ixs::create_close_position_short_ix, IndexedCustodiesThreadSafe,
-        CLOSE_POSITION_SHORT_CU_LIMIT,
+        handlers::{
+            create_ixs::create_close_position_short_ix,
+            liquidate_long::calculate_size_risk_adjusted_position_fees,
+        },
+        IndexedCustodiesThreadSafe, PriorityFeesThreadSafe, CLOSE_POSITION_SHORT_CU_LIMIT,
     },
     adrena_abi::{
         main_pool::USDC_CUSTODY_ID, oracle_price::OraclePrice, types::Cortex, Position, ADX_MINT,
@@ -21,7 +24,7 @@ pub async fn sl_short(
     indexed_custodies: &IndexedCustodiesThreadSafe,
     program: &Program<Arc<Keypair>>,
     cortex: &Cortex,
-    median_priority_fee: u64,
+    priority_fees: &PriorityFeesThreadSafe,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
     if position.stop_loss_reached(oracle_price.price) {
         // no op
@@ -94,10 +97,13 @@ pub async fn sl_short(
         position.stop_loss_close_position_price,
     );
 
+    let priority_fee =
+        calculate_size_risk_adjusted_position_fees(&position, &priority_fees).await?;
+
     let tx = program
         .request()
         .instruction(ComputeBudgetInstruction::set_compute_unit_price(
-            median_priority_fee,
+            priority_fee,
         ))
         .instruction(ComputeBudgetInstruction::set_compute_unit_limit(
             CLOSE_POSITION_SHORT_CU_LIMIT,
