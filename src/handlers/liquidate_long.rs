@@ -112,7 +112,8 @@ pub async fn liquidate_long(
     );
 
     let (_, priority_fee) =
-        calculate_fee_risk_adjusted_position_fees(&position, &indexed_custodies, &priority_fees).await?;
+        calculate_fee_risk_adjusted_position_fees(&position, &indexed_custodies, &priority_fees)
+            .await?;
 
     let tx = program
         .request()
@@ -186,7 +187,7 @@ pub async fn calculate_fee_risk_adjusted_position_fees(
     let unrealized_loss_usd = position.liquidation_fee_usd + total_unrealized_interest_usd;
     let priority_fees_read = priority_fees.read().await;
     let priority_fee = match unrealized_loss_usd {
-        loss if loss > 2500 => {
+        loss if loss > 2_500_000000 => {
             log::info!(
                 "  <> -- Unrealized Loss: {}, Priority Fee: {} ULTRA",
                 unrealized_loss_usd,
@@ -194,7 +195,7 @@ pub async fn calculate_fee_risk_adjusted_position_fees(
             );
             priority_fees_read.ultra
         }
-        loss if loss > 500 => {
+        loss if loss > 500_000000 => {
             log::info!(
                 "  <> -- Unrealized Loss: {}, Priority Fee: {} HIGH",
                 unrealized_loss_usd,
@@ -215,7 +216,7 @@ pub async fn calculate_size_risk_adjusted_position_fees(
 ) -> Result<u64, anyhow::Error> {
     let priority_fees_read = priority_fees.read().await;
     let priority_fee = match position.borrow_size_usd {
-        size if size > 1_000_000 => {
+        size if size > 1_000_000_000000 => {
             log::info!(
                 "  <> -- Borrow Size: {}, Priority Fee: {} ULTRA",
                 position.borrow_size_usd,
@@ -223,7 +224,7 @@ pub async fn calculate_size_risk_adjusted_position_fees(
             );
             priority_fees_read.ultra
         }
-        loss if loss > 100_000 => {
+        loss if loss > 100_000_000000 => {
             log::info!(
                 "  <> -- Borrow Size: {}, Priority Fee: {} HIGH",
                 position.borrow_size_usd,
