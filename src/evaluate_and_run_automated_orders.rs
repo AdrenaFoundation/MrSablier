@@ -1,7 +1,7 @@
 use {
     crate::{
         handlers::{self},
-        IndexedCustodiesThreadSafe, IndexedPositionsThreadSafe,
+        IndexedCustodiesThreadSafe, IndexedPositionsThreadSafe, PriorityFeesThreadSafe,
     },
     adrena_abi::{oracle_price::OraclePrice, pyth::PriceUpdateV2, types::Cortex, Pool, Side},
     anchor_client::{Client, Cluster},
@@ -21,7 +21,7 @@ pub async fn evaluate_and_run_automated_orders(
     endpoint: &str,
     cortex: &Cortex,
     pool: &Pool,
-    median_priority_fee: u64,
+    priority_fees: &PriorityFeesThreadSafe,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
     // Deserialize price update v2 account
     let trade_oracle: PriceUpdateV2 =
@@ -64,7 +64,7 @@ pub async fn evaluate_and_run_automated_orders(
         let indexed_custodies = Arc::clone(indexed_custodies);
         let cortex = *cortex;
         let pool = *pool;
-        let median_priority_fee = median_priority_fee;
+        let priority_fees = Arc::clone(priority_fees);
 
         let client = Client::new(
             Cluster::Custom(endpoint.to_string(), endpoint.to_string()),
@@ -89,7 +89,7 @@ pub async fn evaluate_and_run_automated_orders(
                                 &indexed_custodies,
                                 &program,
                                 &cortex,
-                                median_priority_fee,
+                                &priority_fees,
                             )
                             .await
                             {
@@ -106,7 +106,7 @@ pub async fn evaluate_and_run_automated_orders(
                                 &indexed_custodies,
                                 &program,
                                 &cortex,
-                                median_priority_fee,
+                                &priority_fees,
                             )
                             .await
                             {
@@ -123,7 +123,7 @@ pub async fn evaluate_and_run_automated_orders(
                             &program,
                             &cortex,
                             &pool,
-                            median_priority_fee,
+                            &priority_fees,
                         )
                         .await
                         {
@@ -142,7 +142,7 @@ pub async fn evaluate_and_run_automated_orders(
                                 &indexed_custodies,
                                 &program,
                                 &cortex,
-                                median_priority_fee,
+                                &priority_fees,
                             )
                             .await
                             {
@@ -159,7 +159,7 @@ pub async fn evaluate_and_run_automated_orders(
                                 &indexed_custodies,
                                 &program,
                                 &cortex,
-                                median_priority_fee,
+                                &priority_fees,
                             )
                             .await
                             {
@@ -176,7 +176,7 @@ pub async fn evaluate_and_run_automated_orders(
                             &program,
                             &cortex,
                             &pool,
-                            median_priority_fee,
+                            &priority_fees,
                         )
                         .await
                         {

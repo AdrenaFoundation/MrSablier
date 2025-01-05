@@ -39,7 +39,7 @@ type AccountFilterMap = HashMap<String, SubscribeRequestFilterAccounts>;
 
 type IndexedPositionsThreadSafe = Arc<RwLock<HashMap<Pubkey, adrena_abi::types::Position>>>;
 type IndexedCustodiesThreadSafe = Arc<RwLock<HashMap<Pubkey, adrena_abi::types::Custody>>>;
-
+type PriorityFeesThreadSafe = Arc<RwLock<PriorityFees>>;
 // https://solscan.io/account/rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ
 pub const PYTH_RECEIVER_PROGRAM: &str = "rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ";
 
@@ -53,7 +53,9 @@ pub mod utils;
 const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:10000";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-const MEAN_PRIORITY_FEE_PERCENTILE: u64 = 5000; // 50th
+const MEDIAN_PRIORITY_FEE_PERCENTILE: u64 = 5000; // 50th
+const HIGH_PRIORITY_FEE_PERCENTILE: u64 = 7000; // 70th
+const ULTRA_PRIORITY_FEE_PERCENTILE: u64 = 9000; // 90th
 const PRIORITY_FEE_REFRESH_INTERVAL: Duration = Duration::from_secs(5); // seconds
 pub const CLOSE_POSITION_LONG_CU_LIMIT: u32 = 385_000;
 pub const CLOSE_POSITION_SHORT_CU_LIMIT: u32 = 285_000;
@@ -190,6 +192,13 @@ async fn generate_accounts_filter_map(
     accounts_filter_map
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct PriorityFees {
+    pub median: u64,
+    pub high: u64,
+    pub ultra: u64,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env::set_var(
@@ -321,30 +330,36 @@ async fn main() -> anyhow::Result<()> {
             // ////////////////////////////////////////////////////////////////
             // Side thread to fetch the median priority fee every 5 seconds
             // ////////////////////////////////////////////////////////////////
-            let median_priority_fee = Arc::new(Mutex::new(0u64));
+            let priority_fees = Arc::new(RwLock::new(PriorityFees {
+                median: 0,
+                high: 0, 
+                ultra: 0,
+            }));
             // Spawn a task to poll priority fees every 5 seconds
             log::info!("3 - Spawn a task to poll priority fees every 5 seconds...");
             #[allow(unused_assignments)]
             {
             periodical_priority_fees_fetching_task = Some({
-                let median_priority_fee = Arc::clone(&median_priority_fee);
+                let priority_fees = Arc::clone(&priority_fees);
+                
                 tokio::spawn(async move {
                     let mut fee_refresh_interval = interval(PRIORITY_FEE_REFRESH_INTERVAL);
                     loop {
                         fee_refresh_interval.tick().await;
-                        if let Ok(fee) =
-                            fetch_mean_priority_fee(&client, MEAN_PRIORITY_FEE_PERCENTILE).await
-                        {
-                            let mut fee_lock = median_priority_fee.lock().await;
-                            *fee_lock = fee;
-                            log::debug!(
-                                "  <> Updated median priority fee 30th percentile to : {} µLamports / cu",
-                                fee
-                            );
+                        let mut priority_fees_write = priority_fees.write().await;
+                        
+                        if let Ok(fee) = fetch_mean_priority_fee(&client, MEDIAN_PRIORITY_FEE_PERCENTILE).await {
+                            priority_fees_write.median = fee;
+                        }
+                        if let Ok(fee) = fetch_mean_priority_fee(&client, HIGH_PRIORITY_FEE_PERCENTILE).await {
+                            priority_fees_write.high = fee;
+                        }
+                        if let Ok(fee) = fetch_mean_priority_fee(&client, ULTRA_PRIORITY_FEE_PERCENTILE).await {
+                            priority_fees_write.ultra = fee;
                         }
                     }
-                    })
-                });
+                })
+            });
             }
 
             // ////////////////////////////////////////////////////////////////
@@ -368,7 +383,7 @@ async fn main() -> anyhow::Result<()> {
                             &cortex,
                             &pool,
                             &mut subscribe_tx,
-                            *median_priority_fee.lock().await,
+                            &priority_fees,
                         )
                         .await
                         {

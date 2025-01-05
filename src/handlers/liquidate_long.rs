@@ -1,6 +1,7 @@
 use {
     crate::{
-        handlers::create_liquidate_long_ix, IndexedCustodiesThreadSafe, LIQUIDATE_LONG_CU_LIMIT,
+        handlers::create_liquidate_long_ix, IndexedCustodiesThreadSafe, PriorityFeesThreadSafe,
+        LIQUIDATE_LONG_CU_LIMIT,
     },
     adrena_abi::{
         main_pool::USDC_CUSTODY_ID, oracle_price::OraclePrice, types::Cortex, LeverageCheckStatus,
@@ -21,7 +22,7 @@ pub async fn liquidate_long(
     program: &Program<Arc<Keypair>>,
     cortex: &Cortex,
     pool: &Pool,
-    median_priority_fee: u64,
+    priority_fees: &PriorityFeesThreadSafe,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
     let current_time = chrono::Utc::now().timestamp();
 
@@ -110,10 +111,14 @@ pub async fn liquidate_long(
         custody,
     );
 
+    let (_, priority_fee) =
+        calculate_fee_risk_adjusted_position_fees(&position, &indexed_custodies, &priority_fees)
+            .await?;
+
     let tx = program
         .request()
         .instruction(ComputeBudgetInstruction::set_compute_unit_price(
-            median_priority_fee,
+            priority_fee,
         ))
         .instruction(ComputeBudgetInstruction::set_compute_unit_limit(
             LIQUIDATE_LONG_CU_LIMIT,
@@ -159,4 +164,76 @@ pub async fn liquidate_long(
     // TODO wait for confirmation and retry if needed
 
     Ok(())
+}
+
+// This function adjust which priority fees we will use based on the position's unrealized loss.
+// Goal is to pay more fees for positions that will yield more fees to the protocol to make sure they lend
+pub async fn calculate_fee_risk_adjusted_position_fees(
+    position: &Position,
+    indexed_custodies: &IndexedCustodiesThreadSafe,
+    priority_fees: &PriorityFeesThreadSafe,
+) -> Result<(u64, u64), anyhow::Error> {
+    let indexed_custodies_read = indexed_custodies.read().await;
+    let collateral_custody = indexed_custodies_read
+        .get(&position.collateral_custody)
+        .unwrap()
+        .clone();
+
+    let current_time = chrono::Utc::now().timestamp();
+    let total_unrealized_interest_usd = collateral_custody
+        .get_interest_amount_usd(position, current_time)?
+        + position.unrealized_interest_usd;
+
+    let unrealized_loss_usd = position.liquidation_fee_usd + total_unrealized_interest_usd;
+    let priority_fees_read = priority_fees.read().await;
+    let priority_fee = match unrealized_loss_usd {
+        loss if loss > 2_500_000000 => {
+            log::info!(
+                "  <> -- Unrealized Loss: {}, Priority Fee: {} ULTRA",
+                unrealized_loss_usd,
+                priority_fees_read.ultra
+            );
+            priority_fees_read.ultra
+        }
+        loss if loss > 500_000000 => {
+            log::info!(
+                "  <> -- Unrealized Loss: {}, Priority Fee: {} HIGH",
+                unrealized_loss_usd,
+                priority_fees_read.high
+            );
+            priority_fees_read.high
+        }
+        _ => priority_fees_read.median,
+    };
+
+    Ok((unrealized_loss_usd, priority_fee))
+}
+
+// write a similar function that base the risk calculation on the position size (for SL/TP)
+pub async fn calculate_size_risk_adjusted_position_fees(
+    position: &Position,
+    priority_fees: &PriorityFeesThreadSafe,
+) -> Result<u64, anyhow::Error> {
+    let priority_fees_read = priority_fees.read().await;
+    let priority_fee = match position.borrow_size_usd {
+        size if size > 1_000_000_000000 => {
+            log::info!(
+                "  <> -- Borrow Size: {}, Priority Fee: {} ULTRA",
+                position.borrow_size_usd,
+                priority_fees_read.ultra
+            );
+            priority_fees_read.ultra
+        }
+        loss if loss > 100_000_000000 => {
+            log::info!(
+                "  <> -- Borrow Size: {}, Priority Fee: {} HIGH",
+                position.borrow_size_usd,
+                priority_fees_read.high
+            );
+            priority_fees_read.high
+        }
+        _ => priority_fees_read.median,
+    };
+
+    Ok(priority_fee)
 }

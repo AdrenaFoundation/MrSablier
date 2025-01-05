@@ -1,6 +1,9 @@
 use {
     crate::{
-        handlers::create_liquidate_short_ix, IndexedCustodiesThreadSafe, LIQUIDATE_SHORT_CU_LIMIT,
+        handlers::{
+            create_liquidate_short_ix, liquidate_long::calculate_fee_risk_adjusted_position_fees,
+        },
+        IndexedCustodiesThreadSafe, PriorityFeesThreadSafe, LIQUIDATE_SHORT_CU_LIMIT,
     },
     adrena_abi::{
         main_pool::USDC_CUSTODY_ID, oracle_price::OraclePrice, types::Cortex, LeverageCheckStatus,
@@ -21,7 +24,7 @@ pub async fn liquidate_short(
     program: &Program<Arc<Keypair>>,
     cortex: &Cortex,
     pool: &Pool,
-    median_priority_fee: u64,
+    priority_fees: &PriorityFeesThreadSafe,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
     let current_time = chrono::Utc::now().timestamp();
 
@@ -116,10 +119,14 @@ pub async fn liquidate_short(
         collateral_custody,
     );
 
+    let (_, priority_fee) =
+        calculate_fee_risk_adjusted_position_fees(&position, &indexed_custodies, &priority_fees)
+            .await?;
+
     let tx = program
         .request()
         .instruction(ComputeBudgetInstruction::set_compute_unit_price(
-            median_priority_fee,
+            priority_fee,
         ))
         .instruction(ComputeBudgetInstruction::set_compute_unit_limit(
             LIQUIDATE_SHORT_CU_LIMIT,
