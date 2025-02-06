@@ -24,7 +24,11 @@ pub fn create_close_position_long_ix(
 ) {
     let args = adrena_abi::instruction::ClosePositionLong {
         params: adrena_abi::types::ClosePositionLongParams {
-            price: Some(limit_price),
+            price: if limit_price != 0 {
+                Some(limit_price)
+            } else {
+                None
+            },
         },
     };
     let accounts = adrena_abi::accounts::ClosePositionLong {
@@ -81,7 +85,11 @@ pub fn create_close_position_short_ix(
 ) {
     let args = adrena_abi::instruction::ClosePositionShort {
         params: adrena_abi::types::ClosePositionShortParams {
-            price: Some(limit_price),
+            price: if limit_price != 0 {
+                Some(limit_price)
+            } else {
+                None
+            },
         },
     };
     let accounts = adrena_abi::accounts::ClosePositionShort {

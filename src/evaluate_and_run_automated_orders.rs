@@ -79,9 +79,7 @@ pub async fn evaluate_and_run_automated_orders(
                 match position.get_side() {
                     Side::Long => {
                         // Check SL
-                        if position.stop_loss_is_set()
-                            && position.stop_loss_close_position_price != 0
-                        {
+                        if position.stop_loss_is_set() {
                             if let Err(e) = handlers::sl_long::sl_long(
                                 &position_key,
                                 &position,
@@ -132,9 +130,7 @@ pub async fn evaluate_and_run_automated_orders(
                     }
                     Side::Short => {
                         // Check SL
-                        if position.stop_loss_is_set()
-                            && position.stop_loss_close_position_price != 0
-                        {
+                        if position.stop_loss_is_set() {
                             if let Err(e) = handlers::sl_short::sl_short(
                                 &position_key,
                                 &position,
