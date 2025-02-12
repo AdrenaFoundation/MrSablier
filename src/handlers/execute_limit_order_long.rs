@@ -33,16 +33,6 @@ pub async fn execute_limit_order_long(
     )
     .0;
 
-    let user_profile_pda = adrena_abi::pda::get_user_profile_pda(&limit_order_book.owner).0;
-    // Fetch the user profile account
-    let user_profile_account = program.rpc().get_account(&user_profile_pda).await.ok(); // Convert Result to Option, None if error
-
-    // Check if the user profile exists (owned by the Adrena program)
-    let user_profile = match user_profile_account {
-        Some(account) if account.owner == adrena_abi::ID => Some(user_profile_pda),
-        _ => None,
-    };
-
     let transfer_authority_pda = adrena_abi::pda::get_transfer_authority_pda().0;
 
     let (execute_limit_order_long_ix, execute_limit_order_long_ix_accounts) = create_execute_limit_order_long_ix(
@@ -51,7 +41,6 @@ pub async fn execute_limit_order_long(
         &position_pda,
         &pool_pda,
         &transfer_authority_pda,
-        user_profile,
         &collateral_escrow_pda,
         &limit_order_book_pda,
         &limit_order.custody,

@@ -87,16 +87,6 @@ pub async fn liquidate_short(
     )
     .0;
 
-    let user_profile_pda = adrena_abi::pda::get_user_profile_pda(&position.owner).0;
-    // Fetch the user profile account
-    let user_profile_account = program.rpc().get_account(&user_profile_pda).await.ok(); // Convert Result to Option, None if error
-
-    // Check if the user profile exists (owned by the Adrena program)
-    let user_profile = match user_profile_account {
-        Some(account) if account.owner == adrena_abi::ID => Some(user_profile_pda),
-        _ => None,
-    };
-
     let transfer_authority_pda = adrena_abi::pda::get_transfer_authority_pda().0;
     let lm_staking = adrena_abi::pda::get_staking_pda(&ADX_MINT).0;
     let lp_staking = adrena_abi::pda::get_staking_pda(&ALP_MINT).0;
@@ -110,7 +100,6 @@ pub async fn liquidate_short(
         lm_staking,
         lp_staking,
         cortex,
-        user_profile,
         staking_reward_token_custody,
         custody,
         collateral_custody,

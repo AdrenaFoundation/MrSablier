@@ -1,12 +1,8 @@
 use {
-    crate::{
-        handlers::create_close_position_long_ix, IndexedCustodiesThreadSafe,
-        CLOSE_POSITION_LONG_CU_LIMIT,
-    },
+    crate::{handlers::create_close_position_long_ix, IndexedCustodiesThreadSafe, CLOSE_POSITION_LONG_CU_LIMIT},
     adrena_abi::{
-        get_transfer_authority_pda, get_user_profile_pda, main_pool::USDC_CUSTODY_ID,
-        oracle_price::OraclePrice, types::Cortex, Position, ADX_MINT, ALP_MINT,
-        SPL_ASSOCIATED_TOKEN_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID,
+        get_transfer_authority_pda, main_pool::USDC_CUSTODY_ID, oracle_price::OraclePrice, types::Cortex,
+        Position, ADX_MINT, ALP_MINT, SPL_ASSOCIATED_TOKEN_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID,
     },
     anchor_client::Program,
     solana_client::rpc_config::RpcSendTransactionConfig,
@@ -45,9 +41,7 @@ pub async fn sl_long(
 
     let indexed_custodies_read = indexed_custodies.read().await;
     let custody = indexed_custodies_read.get(&position.custody).unwrap();
-    let collateral_custody = indexed_custodies_read
-        .get(&position.collateral_custody)
-        .unwrap();
+    let collateral_custody = indexed_custodies_read.get(&position.collateral_custody).unwrap();
     let staking_reward_token_custody = indexed_custodies_read.get(&USDC_CUSTODY_ID).unwrap();
 
     let collateral_mint = collateral_custody.mint;
@@ -62,16 +56,6 @@ pub async fn sl_long(
     )
     .0;
 
-    let user_profile_pda = get_user_profile_pda(&position.owner).0;
-    // Fetch the user profile account
-    let user_profile_account = program.rpc().get_account(&user_profile_pda).await.ok(); // Convert Result to Option, None if error
-
-    // Check if the user profile exists (owned by the Adrena program)
-    let user_profile = match user_profile_account {
-        Some(account) if account.owner == adrena_abi::ID => Some(user_profile_pda),
-        _ => None,
-    };
-
     let transfer_authority_pda = get_transfer_authority_pda().0;
     let lm_staking = adrena_abi::pda::get_staking_pda(&ADX_MINT).0;
     let lp_staking = adrena_abi::pda::get_staking_pda(&ALP_MINT).0;
@@ -85,7 +69,6 @@ pub async fn sl_long(
         lm_staking,
         lp_staking,
         cortex,
-        user_profile,
         staking_reward_token_custody,
         custody,
         position.stop_loss_close_position_price,
@@ -93,12 +76,8 @@ pub async fn sl_long(
 
     let tx = program
         .request()
-        .instruction(ComputeBudgetInstruction::set_compute_unit_price(
-            median_priority_fee,
-        ))
-        .instruction(ComputeBudgetInstruction::set_compute_unit_limit(
-            CLOSE_POSITION_LONG_CU_LIMIT,
-        ))
+        .instruction(ComputeBudgetInstruction::set_compute_unit_price(median_priority_fee))
+        .instruction(ComputeBudgetInstruction::set_compute_unit_limit(CLOSE_POSITION_LONG_CU_LIMIT))
         .instruction(create_associated_token_account_idempotent(
             &program.payer(),
             &position.owner,
