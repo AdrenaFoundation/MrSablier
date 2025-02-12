@@ -1,5 +1,11 @@
 use {
-    crate::{handlers::create_close_position_long_ix, IndexedCustodiesThreadSafe, CLOSE_POSITION_LONG_CU_LIMIT},
+    crate::{
+        handlers::{
+            create_close_position_long_ix,
+            liquidate_long::calculate_size_risk_adjusted_position_fees,
+        },
+        IndexedCustodiesThreadSafe, PriorityFeesThreadSafe, CLOSE_POSITION_LONG_CU_LIMIT,
+    },
     adrena_abi::{
         get_transfer_authority_pda, main_pool::USDC_CUSTODY_ID, oracle_price::OraclePrice, types::Cortex,
         Position, ADX_MINT, ALP_MINT, SPL_ASSOCIATED_TOKEN_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID,
@@ -18,25 +24,28 @@ pub async fn sl_long(
     indexed_custodies: &IndexedCustodiesThreadSafe,
     program: &Program<Arc<Keypair>>,
     cortex: &Cortex,
-    median_priority_fee: u64,
+    priority_fees: &PriorityFeesThreadSafe,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
     if position.stop_loss_reached(oracle_price.price) {
+        // no op
+    } else {
+        return Ok(());
+    }
+
+    // check stop loss slippage is below 1% else return
+    if position.stop_loss_slippage_ok(oracle_price.price) {
         log::info!(
             "  <*> SL condition met for LONG position {:#?} - Price: {}",
             position_key,
             oracle_price.price
         );
     } else {
-        return Ok(());
-    }
-
-    // check stop loss slippage is below 1% else return
-    if !position.stop_loss_slippage_ok(oracle_price.price) {
         log::info!(
-            "  <*> SL Long for position {:#?} - Price: {}",
+            "  <*> SL condition met for LONG position {:#?} - But price isn't within slippage range: {}",
             position_key,
             oracle_price.price
         );
+        return Ok(());
     }
 
     let indexed_custodies_read = indexed_custodies.read().await;
@@ -74,10 +83,17 @@ pub async fn sl_long(
         position.stop_loss_close_position_price,
     );
 
+    let priority_fee =
+        calculate_size_risk_adjusted_position_fees(&position, &priority_fees).await?;
+
     let tx = program
         .request()
-        .instruction(ComputeBudgetInstruction::set_compute_unit_price(median_priority_fee))
-        .instruction(ComputeBudgetInstruction::set_compute_unit_limit(CLOSE_POSITION_LONG_CU_LIMIT))
+        .instruction(ComputeBudgetInstruction::set_compute_unit_price(
+            priority_fee,
+        ))
+        .instruction(ComputeBudgetInstruction::set_compute_unit_limit(
+            CLOSE_POSITION_LONG_CU_LIMIT,
+        ))
         .instruction(create_associated_token_account_idempotent(
             &program.payer(),
             &position.owner,

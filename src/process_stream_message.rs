@@ -3,7 +3,7 @@ use {
         evaluate_and_run_automated_orders::evaluate_and_run_automated_orders,
         generate_accounts_filter_map,
         update_indexes::{update_indexed_limit_order_books, update_indexed_positions},
-        IndexedCustodiesThreadSafe, IndexedLimitOrderBooksThreadSafe, IndexedPositionsThreadSafe,
+        IndexedCustodiesThreadSafe, IndexedLimitOrderBooksThreadSafe, IndexedPositionsThreadSafe, PriorityFeesThreadSafe,
     },
     adrena_abi::{
         types::{Cortex, Position},
@@ -38,7 +38,7 @@ pub async fn process_stream_message<S>(
     cortex: &Cortex,
     pool: &Pool,
     subscribe_tx: &mut S,
-    median_priority_fee: u64,
+    priority_fees: &PriorityFeesThreadSafe,
 ) -> Result<(), backoff::Error<anyhow::Error>>
 where
     S: Sink<SubscribeRequest, Error = SendError> + Unpin,
@@ -69,7 +69,7 @@ where
                             endpoint,
                             cortex,
                             pool,
-                            median_priority_fee,
+                            priority_fees,
                         )
                         .await?;
                         // log::info!(

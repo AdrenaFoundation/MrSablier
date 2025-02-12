@@ -1,7 +1,10 @@
 use {
     crate::{
-        handlers::create_close_position_long_ix, IndexedCustodiesThreadSafe,
-        CLOSE_POSITION_LONG_CU_LIMIT,
+        handlers::{
+            create_close_position_long_ix,
+            liquidate_long::calculate_size_risk_adjusted_position_fees,
+        },
+        IndexedCustodiesThreadSafe, PriorityFeesThreadSafe, CLOSE_POSITION_LONG_CU_LIMIT,
     },
     adrena_abi::{
         main_pool::USDC_CUSTODY_ID, oracle_price::OraclePrice, types::Cortex, Position, ADX_MINT,
@@ -21,7 +24,7 @@ pub async fn tp_long(
     indexed_custodies: &IndexedCustodiesThreadSafe,
     program: &Program<Arc<Keypair>>,
     cortex: &Cortex,
-    median_priority_fee: u64,
+    priority_fees: &PriorityFeesThreadSafe,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
     if position.take_profit_reached(oracle_price.price) {
         log::info!(
@@ -70,10 +73,13 @@ pub async fn tp_long(
         position.take_profit_limit_price,
     );
 
+    let priority_fee =
+        calculate_size_risk_adjusted_position_fees(&position, &priority_fees).await?;
+
     let tx = program
         .request()
         .instruction(ComputeBudgetInstruction::set_compute_unit_price(
-            median_priority_fee,
+            priority_fee,
         ))
         .instruction(ComputeBudgetInstruction::set_compute_unit_limit(
             CLOSE_POSITION_LONG_CU_LIMIT,
