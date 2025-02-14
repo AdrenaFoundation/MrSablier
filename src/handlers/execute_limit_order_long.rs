@@ -1,5 +1,8 @@
 use {
-    crate::{handlers::create_execute_limit_order_long_ix, IndexedCustodiesThreadSafe, EXECUTE_LIMIT_ORDER_LONG_CU_LIMIT},
+    crate::{
+        handlers::create_execute_limit_order_long_ix, IndexedCustodiesThreadSafe, PriorityFeesThreadSafe,
+        EXECUTE_LIMIT_ORDER_LONG_CU_LIMIT,
+    },
     adrena_abi::{LimitOrder, LimitOrderBook},
     anchor_client::Program,
     solana_client::rpc_config::RpcSendTransactionConfig,
@@ -13,7 +16,7 @@ pub async fn execute_limit_order_long(
     limit_order: &LimitOrder,
     indexed_custodies: &IndexedCustodiesThreadSafe,
     program: &Program<Arc<Keypair>>,
-    median_priority_fee: u64,
+    priority_fees: &PriorityFeesThreadSafe,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
     let indexed_custodies_read = indexed_custodies.read().await;
     let custody = indexed_custodies_read.get(&limit_order.custody).unwrap();
@@ -48,9 +51,11 @@ pub async fn execute_limit_order_long(
         limit_order.id,
     );
 
+    let priority_fees_read = priority_fees.read().await;
+
     let tx = program
         .request()
-        .instruction(ComputeBudgetInstruction::set_compute_unit_price(median_priority_fee))
+        .instruction(ComputeBudgetInstruction::set_compute_unit_price(priority_fees_read.high))
         .instruction(ComputeBudgetInstruction::set_compute_unit_limit(
             EXECUTE_LIMIT_ORDER_LONG_CU_LIMIT,
         ))

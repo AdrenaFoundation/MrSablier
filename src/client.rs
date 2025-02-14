@@ -138,6 +138,10 @@ async fn generate_accounts_filter_map(
     // Retrieve the existing positions keys - they are monitored for close events
     let existing_positions_keys: Vec<String> = indexed_positions.read().await.keys().map(|p| p.to_string()).collect();
 
+    // Retrieve the existing limit order book keys - they are monitored for close events
+    let existing_limit_order_books_keys: Vec<String> =
+        indexed_limit_order_books.read().await.keys().map(|p| p.to_string()).collect();
+
     // Create the accounts filter map (on all positions based on discriminator, and the above price update v2 pdas)
     let mut accounts_filter_map: AccountFilterMap = HashMap::new();
 
@@ -150,6 +154,7 @@ async fn generate_accounts_filter_map(
     };
 
     let position_owner = vec![adrena_abi::ID.to_string()];
+
     accounts_filter_map.insert(
         "positions_create_update".to_owned(),
         SubscribeRequestFilterAccounts {
@@ -160,16 +165,50 @@ async fn generate_accounts_filter_map(
         },
     );
 
-    // Existing positions - We monitor these to catch when they are closed
+    if !existing_positions_keys.is_empty() {
+        // Existing positions - We monitor these to catch when they are closed
+        accounts_filter_map.insert(
+            "positions_close".to_owned(),
+            SubscribeRequestFilterAccounts {
+                account: existing_positions_keys,
+                owner: vec![],
+                filters: vec![],
+                nonempty_txn_signature: None,
+                },
+            );
+    }
+
+    let limit_order_book_owner = vec![adrena_abi::ID.to_string()];
+
+    let limit_order_book_filter_discriminator = SubscribeRequestFilterAccountsFilter {
+        filter: Some(AccountsFilterDataOneof::Memcmp(SubscribeRequestFilterAccountsFilterMemcmp {
+            offset: 0,
+            data: Some(AccountsFilterMemcmpOneof::Bytes(get_limit_order_book_anchor_discriminator())),
+        })),
+    };
+
     accounts_filter_map.insert(
-        "positions_close".to_owned(),
+        "limit_order_books_create_update".to_owned(),
         SubscribeRequestFilterAccounts {
-            account: existing_positions_keys,
-            owner: vec![],
-            filters: vec![],
+            account: vec![],
+            owner: limit_order_book_owner,
+            filters: vec![limit_order_book_filter_discriminator],
             nonempty_txn_signature: None,
         },
     );
+
+    if !existing_limit_order_books_keys.is_empty() {
+        // Existing limit order books - We monitor these to catch when they are closed
+        accounts_filter_map.insert(
+            "limit_order_books_close".to_owned(),
+            SubscribeRequestFilterAccounts {
+                account: existing_limit_order_books_keys,
+                owner: vec![],
+                filters: vec![],
+                nonempty_txn_signature: None,
+                },
+            );
+    }
 
     // Price update v2 pdas - the price updates
     let price_feed_owner = vec![PYTH_RECEIVER_PROGRAM.to_owned()];
@@ -182,40 +221,6 @@ async fn generate_accounts_filter_map(
             nonempty_txn_signature: None,
         },
     );
-
-    // let limit_order_book_owner = vec![adrena_abi::ID.to_string()];
-
-    // let limit_order_book_filter_discriminator = SubscribeRequestFilterAccountsFilter {
-    //     filter: Some(AccountsFilterDataOneof::Memcmp(SubscribeRequestFilterAccountsFilterMemcmp {
-    //         offset: 0,
-    //         data: Some(AccountsFilterMemcmpOneof::Bytes(get_limit_order_book_anchor_discriminator())),
-    //     })),
-    // };
-
-    // accounts_filter_map.insert(
-    //     "limit_order_books_create_update".to_owned(),
-    //     SubscribeRequestFilterAccounts {
-    //         account: vec![],
-    //         owner: limit_order_book_owner,
-    //         filters: vec![limit_order_book_filter_discriminator],
-    //         nonempty_txn_signature: None,
-    //     },
-    // );
-
-    // // Retrieve the existing limit order book keys - they are monitored for close events
-    // let existing_limit_order_books_keys: Vec<String> =
-    //     indexed_limit_order_books.read().await.keys().map(|p| p.to_string()).collect();
-
-    // // Existing limit order books - We monitor these to catch when they are closed
-    // accounts_filter_map.insert(
-    //     "limit_order_books_close".to_owned(),
-    //     SubscribeRequestFilterAccounts {
-    //         account: existing_limit_order_books_keys,
-    //         owner: vec![],
-    //         filters: vec![],
-    //         nonempty_txn_signature: None,
-    //     },
-    // );
 
     accounts_filter_map
 }
@@ -313,15 +318,15 @@ async fn main() -> anyhow::Result<()> {
 
             log::info!("2 - Retrieving and indexing existing limit order books...");
             {
-                // let limit_order_book_pda_filter = RpcFilterType::Memcmp(Memcmp::new_base58_encoded(0, &get_limit_order_book_anchor_discriminator()));
-                // let filters = vec![limit_order_book_pda_filter];
-                // let existing_limit_order_book_accounts = program
-                //     .accounts::<LimitOrderBook>(filters)
-                //     .await
-                //     .map_err(|e| backoff::Error::transient(e.into()))?;
-                // // Extend the indexed positions map with the existing positions
-                // indexed_limit_order_books.write().await.extend(existing_limit_order_book_accounts);
-                // log::info!("  <> # of existing limit order books parsed and loaded: {}", indexed_limit_order_books.read().await.len());
+                let limit_order_book_pda_filter = RpcFilterType::Memcmp(Memcmp::new_base58_encoded(0, &get_limit_order_book_anchor_discriminator()));
+                let filters = vec![limit_order_book_pda_filter];
+                let existing_limit_order_book_accounts = program
+                    .accounts::<LimitOrderBook>(filters)
+                    .await
+                    .map_err(|e| backoff::Error::transient(e.into()))?;
+                // Extend the indexed limit order books map with the existing limit order books
+                indexed_limit_order_books.write().await.extend(existing_limit_order_book_accounts);
+                log::info!("  <> # of existing limit order books parsed and loaded: {}", indexed_limit_order_books.read().await.len());
             }
 
             // Update the indexed custodies map based on the indexed positions

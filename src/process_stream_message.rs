@@ -134,13 +134,13 @@ where
 
                         match update {
                             LimitOrderBookUpdate::Created(_new_limit_order_book) => {
-                                log::info!("(pcu) New limit order book created: {:#?}", account_key);
+                                log::info!("(lobcu) New limit order book created: {:#?}", account_key);
                             }
                             LimitOrderBookUpdate::Modified(_limit_order_book) => {
-                                log::info!("(pcu) LimitOrderBook modified: {:#?}", account_key);
+                                log::info!("(lobcu) LimitOrderBook modified: {:#?}", account_key);
                             }
                             LimitOrderBookUpdate::Closed => {
-                                log::info!("(pcu) LimitOrderBook closed: {:#?}", account_key);
+                                log::info!("(lobcu) LimitOrderBook closed: {:#?}", account_key);
 
                                 // We need to update the subscriptions request to remove the closed limit order book
                                 subscriptions_update_required = true;
@@ -158,7 +158,7 @@ where
                                 panic!("New limit order book created in limit_order_books_close filter");
                             }
                             LimitOrderBookUpdate::Closed => {
-                                log::info!("(pc) LimitOrderBook closed: {:#?}", account_key);
+                                log::info!("(lobc) LimitOrderBook closed: {:#?}", account_key);
                                 // We need to update the subscriptions request to remove the closed limit order book
                                 subscriptions_update_required = true;
                             }

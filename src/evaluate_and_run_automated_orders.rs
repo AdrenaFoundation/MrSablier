@@ -1,7 +1,7 @@
 use {
     crate::{
         handlers::{self},
-        IndexedCustodiesThreadSafe, IndexedLimitOrderBooksThreadSafe, IndexedPositionsThreadSafe, PriorityFeesThreadSafe
+        IndexedCustodiesThreadSafe, IndexedLimitOrderBooksThreadSafe, IndexedPositionsThreadSafe, PriorityFeesThreadSafe,
     },
     adrena_abi::{oracle_price::OraclePrice, pyth::PriceUpdateV2, types::Cortex, Pool, Side},
     anchor_client::{Client, Cluster},
@@ -190,82 +190,82 @@ pub async fn evaluate_and_run_automated_orders(
         tasks.push(task);
     }
 
-    // // make a clone of the indexed positions map to iterate over (while we modify the original map)
-    // let limit_order_books_shallow_clone = indexed_limit_order_books.read().await.clone();
-    // let mut tasks = vec![];
+    // make a clone of the indexed positions map to iterate over (while we modify the original map)
+    let limit_order_books_shallow_clone = indexed_limit_order_books.read().await.clone();
+    let mut tasks = vec![];
 
-    // // let limit_order_book_custody_keys: HashSet<Pubkey> = indexed_limit_order_books
-    // // .read()
-    // // .await
-    // // .values()
-    // // .flat_map(|l| l.limit_orders.to_vec().into_iter().map(|l| l.custody))
-    // // .collect();
+    // let limit_order_book_custody_keys: HashSet<Pubkey> = indexed_limit_order_books
+    // .read()
+    // .await
+    // .values()
+    // .flat_map(|l| l.limit_orders.to_vec().into_iter().map(|l| l.custody))
+    // .collect();
 
-    // for (limit_order_book_key, limit_order_book) in limit_order_books_shallow_clone.iter() {
-    //     for limit_order in limit_order_book.limit_orders {
-    //         if limit_order.custody != associated_custody_key {
-    //             continue;
-    //         }
+    for (limit_order_book_key, limit_order_book) in limit_order_books_shallow_clone.iter() {
+        for limit_order in limit_order_book.limit_orders {
+            if limit_order.custody != associated_custody_key {
+                continue;
+            }
 
-    //         let limit_order_book_key = *limit_order_book_key;
-    //         let limit_order_book = *limit_order_book;
-    //         let indexed_custodies = Arc::clone(indexed_custodies);
-    //         let median_priority_fee = median_priority_fee;
+            let limit_order_book_key = *limit_order_book_key;
+            let limit_order_book = *limit_order_book;
+            let indexed_custodies = Arc::clone(indexed_custodies);
+            let priority_fees = Arc::clone(priority_fees);
 
-    //         let client = Client::new(Cluster::Custom(endpoint.to_string(), endpoint.to_string()), Arc::clone(payer));
-    //         let program = client
-    //             .program(adrena_abi::ID)
-    //             .map_err(|e| backoff::Error::transient(e.into()))?;
+            let client = Client::new(Cluster::Custom(endpoint.to_string(), endpoint.to_string()), Arc::clone(payer));
+            let program = client
+                .program(adrena_abi::ID)
+                .map_err(|e| backoff::Error::transient(e.into()))?;
 
-    //         let task = tokio::spawn(async move {
-    //             let result: Result<(), anyhow::Error> = async {
-    //                 match limit_order.get_side() {
-    //                     Side::Long => {
-    //                         if limit_order.is_executable(&oracle_price, &associated_custody_key) {
-    //                             if let Err(e) = handlers::execute_limit_order_long::execute_limit_order_long(
-    //                                 &limit_order_book_key,
-    //                                 &limit_order_book,
-    //                                 &limit_order,
-    //                                 &indexed_custodies,
-    //                                 &program,
-    //                                 median_priority_fee,
-    //                             )
-    //                             .await
-    //                             {
-    //                                 log::error!("Error in execute_limit_order_long: {}", e);
-    //                             }
-    //                         }
-    //                     }
-    //                     Side::Short => {
-    //                         if limit_order.is_executable(&oracle_price, &associated_custody_key) {
-    //                             if let Err(e) = handlers::execute_limit_order_short::execute_limit_order_short(
-    //                                 &limit_order_book_key,
-    //                                 &limit_order_book,
-    //                                 &limit_order,
-    //                                 &indexed_custodies,
-    //                                 &program,
-    //                                 median_priority_fee,
-    //                             )
-    //                             .await
-    //                             {
-    //                                 log::error!("Error in execute_limit_order_short: {}", e);
-    //                             }
-    //                         }
-    //                     }
-    //                     _ => {}
-    //                 }
-    //                 Ok::<(), anyhow::Error>(())
-    //             }
-    //             .await;
+            let task = tokio::spawn(async move {
+                let result: Result<(), anyhow::Error> = async {
+                    match limit_order.get_side() {
+                        Side::Long => {
+                            if limit_order.is_executable(&oracle_price, &associated_custody_key) {
+                                if let Err(e) = handlers::execute_limit_order_long::execute_limit_order_long(
+                                    &limit_order_book_key,
+                                    &limit_order_book,
+                                    &limit_order,
+                                    &indexed_custodies,
+                                    &program,
+                                    &priority_fees,
+                                )
+                                .await
+                                {
+                                    log::error!("Error in execute_limit_order_long: {}", e);
+                                }
+                            }
+                        }
+                        Side::Short => {
+                            if limit_order.is_executable(&oracle_price, &associated_custody_key) {
+                                if let Err(e) = handlers::execute_limit_order_short::execute_limit_order_short(
+                                    &limit_order_book_key,
+                                    &limit_order_book,
+                                    &limit_order,
+                                    &indexed_custodies,
+                                    &program,
+                                    &priority_fees,
+                                )
+                                .await
+                                {
+                                    log::error!("Error in execute_limit_order_short: {}", e);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    Ok::<(), anyhow::Error>(())
+                }
+                .await;
 
-    //             if let Err(e) = result {
-    //                 log::error!("Error processing position {}: {:?}", limit_order_book_key, e);
-    //             }
-    //         });
+                if let Err(e) = result {
+                    log::error!("Error processing position {}: {:?}", limit_order_book_key, e);
+                }
+            });
 
-    //         tasks.push(task);
-    //     }
-    // }
+            tasks.push(task);
+        }
+    }
 
     // Wait for all tasks to complete
     for task in tasks {
