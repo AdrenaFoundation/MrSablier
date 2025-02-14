@@ -76,12 +76,14 @@ pub async fn update_indexed_custodies(
         .await
         .values()
         .flat_map(|l| l.limit_orders.to_vec().into_iter().map(|l| l.custody))
+        .filter(|key| key != &Pubkey::default())
         .collect();
     let limit_order_book_collateral_custody_keys: HashSet<Pubkey> = indexed_limit_order_books
         .read()
         .await
         .values()
         .flat_map(|l| l.limit_orders.to_vec().into_iter().map(|l| l.collateral_custody))
+        .filter(|key| key != &Pubkey::default())
         .collect();
 
     let mut custody_keys = positions_custody_keys;
