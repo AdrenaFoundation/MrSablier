@@ -203,7 +203,7 @@ pub async fn evaluate_and_run_automated_orders(
 
     for (limit_order_book_key, limit_order_book) in limit_order_books_shallow_clone.iter() {
         for limit_order in limit_order_book.limit_orders {
-            if limit_order.custody != associated_custody_key {
+            if limit_order.custody == Pubkey::default() || limit_order.custody != associated_custody_key {
                 continue;
             }
 
