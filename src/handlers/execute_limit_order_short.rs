@@ -1,7 +1,7 @@
 use {
     crate::{
         handlers::create_execute_limit_order_short_ix, IndexedCustodiesThreadSafe, PriorityFeesThreadSafe,
-        EXECUTE_LIMIT_ORDER_LONG_CU_LIMIT,
+        EXECUTE_LIMIT_ORDER_SHORT_CU_LIMIT,
     },
     adrena_abi::{LimitOrder, LimitOrderBook},
     anchor_client::Program,
@@ -38,7 +38,7 @@ pub async fn execute_limit_order_short(
 
     let transfer_authority_pda = adrena_abi::pda::get_transfer_authority_pda().0;
 
-    let (execute_limit_order_long_ix, execute_limit_order_long_ix_accounts) = create_execute_limit_order_short_ix(
+    let (execute_limit_order_short_ix, execute_limit_order_short_ix_accounts) = create_execute_limit_order_short_ix(
         &program.payer(),
         &limit_order_book.owner,
         &position_pda,
@@ -59,10 +59,10 @@ pub async fn execute_limit_order_short(
         .request()
         .instruction(ComputeBudgetInstruction::set_compute_unit_price(priority_fees_read.high))
         .instruction(ComputeBudgetInstruction::set_compute_unit_limit(
-            EXECUTE_LIMIT_ORDER_LONG_CU_LIMIT,
+            EXECUTE_LIMIT_ORDER_SHORT_CU_LIMIT,
         ))
-        .args(execute_limit_order_long_ix)
-        .accounts(execute_limit_order_long_ix_accounts)
+        .args(execute_limit_order_short_ix)
+        .accounts(execute_limit_order_short_ix_accounts)
         .signed_transaction()
         .await
         .map_err(|e| {
@@ -88,7 +88,7 @@ pub async fn execute_limit_order_short(
         })?;
 
     log::info!(
-        "  <> Executed Limit Order Long {:#?} id {:?} - TX sent: {:#?}",
+        "  <> Executed Limit Order Short {:#?} id {:?} - TX sent: {:#?}",
         limit_order_book_key.to_string(),
         limit_order.id,
         tx_hash.to_string(),

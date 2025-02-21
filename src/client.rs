@@ -58,7 +58,8 @@ pub const CLOSE_POSITION_SHORT_CU_LIMIT: u32 = 285_000;
 pub const CLEANUP_POSITION_CU_LIMIT: u32 = 60_000;
 pub const LIQUIDATE_LONG_CU_LIMIT: u32 = 355_000;
 pub const LIQUIDATE_SHORT_CU_LIMIT: u32 = 256_000;
-pub const EXECUTE_LIMIT_ORDER_LONG_CU_LIMIT: u32 = 600_000; // TODO: Adapt to a value closer to the truth
+pub const EXECUTE_LIMIT_ORDER_LONG_CU_LIMIT: u32 = 150_000; 
+pub const EXECUTE_LIMIT_ORDER_SHORT_CU_LIMIT: u32 = 300_000; 
 
 #[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
 enum ArgsCommitment {
