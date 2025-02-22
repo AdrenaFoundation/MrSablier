@@ -28,6 +28,13 @@ pub async fn execute_limit_order_short(
     let collateral_escrow_pda =
         adrena_abi::pda::get_collateral_escrow_pda(&pool_pda, &limit_order_book.owner, &collateral_custody.mint).0;
 
+    // Check if collateral escrow account exists
+    let rpc_client = program.rpc();
+    if let Err(_) = rpc_client.get_account(&collateral_escrow_pda).await {
+        log::error!("  <> Collateral escrow account not initialized: {}", collateral_escrow_pda);
+        return Ok(());
+    }
+
     let position_pda = adrena_abi::pda::get_position_pda(
         &limit_order_book.owner,
         &pool_pda,
