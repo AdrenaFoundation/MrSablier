@@ -6,27 +6,30 @@ use {
         LimitOrderBook, Pool,
     },
     anchor_client::{solana_sdk::signer::keypair::read_keypair_file, Client, Cluster},
-    backoff::{future::retry, ExponentialBackoff},
     clap::Parser,
-    futures::{StreamExt, TryFutureExt},
+    futures::StreamExt,
     priority_fees::fetch_mean_priority_fee,
     solana_client::rpc_filter::{Memcmp, RpcFilterType},
     solana_sdk::pubkey::Pubkey,
-    std::{collections::HashMap, env, sync::Arc, time::Duration},
+    std::{
+        collections::{BTreeMap, HashMap},
+        env,
+        str::FromStr,
+        sync::Arc,
+        time::Duration,
+    },
     tokio::{
-        sync::{Mutex, RwLock},
+        sync::RwLock,
         task::JoinHandle,
         time::{interval, timeout},
     },
-    tonic::transport::channel::ClientTlsConfig,
-    yellowstone_grpc_client::{GeyserGrpcClient, Interceptor},
+    yellowstone_fumarole_client::{config::FumaroleConfig, FumaroleClientBuilder},
     yellowstone_grpc_proto::{
-        geyser::{SubscribeRequest, SubscribeRequestFilterAccountsFilter, SubscribeRequestFilterAccountsFilterMemcmp},
-        prelude::{
+        geyser::{
             subscribe_request_filter_accounts_filter::Filter as AccountsFilterDataOneof,
-            subscribe_request_filter_accounts_filter_memcmp::Data as AccountsFilterMemcmpOneof, CommitmentLevel,
-            SubscribeRequestFilterAccounts,
+            subscribe_request_filter_accounts_filter_memcmp::Data as AccountsFilterMemcmpOneof,
         },
+        prelude::*,
     },
 };
 
@@ -47,8 +50,6 @@ pub mod update_indexes;
 pub mod utils;
 
 const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:10000";
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const MEDIAN_PRIORITY_FEE_PERCENTILE: u64 = 5000; // 50th
 const HIGH_PRIORITY_FEE_PERCENTILE: u64 = 7000; // 70th
 const ULTRA_PRIORITY_FEE_PERCENTILE: u64 = 9000; // 90th
@@ -58,8 +59,8 @@ pub const CLOSE_POSITION_SHORT_CU_LIMIT: u32 = 285_000;
 pub const CLEANUP_POSITION_CU_LIMIT: u32 = 60_000;
 pub const LIQUIDATE_LONG_CU_LIMIT: u32 = 355_000;
 pub const LIQUIDATE_SHORT_CU_LIMIT: u32 = 256_000;
-pub const EXECUTE_LIMIT_ORDER_LONG_CU_LIMIT: u32 = 200_000; 
-pub const EXECUTE_LIMIT_ORDER_SHORT_CU_LIMIT: u32 = 200_000; 
+pub const EXECUTE_LIMIT_ORDER_LONG_CU_LIMIT: u32 = 200_000;
+pub const EXECUTE_LIMIT_ORDER_SHORT_CU_LIMIT: u32 = 200_000;
 
 #[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
 enum ArgsCommitment {
@@ -67,16 +68,6 @@ enum ArgsCommitment {
     Processed,
     Confirmed,
     Finalized,
-}
-
-impl From<ArgsCommitment> for CommitmentLevel {
-    fn from(commitment: ArgsCommitment) -> Self {
-        match commitment {
-            ArgsCommitment::Processed => CommitmentLevel::Processed,
-            ArgsCommitment::Confirmed => CommitmentLevel::Confirmed,
-            ArgsCommitment::Finalized => CommitmentLevel::Finalized,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Parser)]
@@ -87,32 +78,20 @@ struct Args {
     endpoint: String,
 
     #[clap(long)]
+    /// Auth token for Fumarole service
     x_token: Option<String>,
-
-    /// Commitment level: processed, confirmed or finalized
-    #[clap(long)]
-    commitment: Option<ArgsCommitment>,
 
     /// Path to the payer keypair
     #[clap(long)]
     payer_keypair: String,
-}
 
-impl Args {
-    fn get_commitment(&self) -> Option<CommitmentLevel> {
-        Some(self.commitment.unwrap_or_default().into())
-    }
+    /// Name of the existing consumer group to connect to
+    #[clap(long)]
+    consumer_group: String,
 
-    async fn connect(&self) -> anyhow::Result<GeyserGrpcClient<impl Interceptor>> {
-        GeyserGrpcClient::build_from_shared(self.endpoint.clone())?
-            .x_token(self.x_token.clone())?
-            .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(REQUEST_TIMEOUT)
-            .tls_config(ClientTlsConfig::new().with_native_roots())?
-            .connect()
-            .await
-            .map_err(Into::into)
-    }
+    /// Member ID within the consumer group (0-5)
+    #[clap(long, default_value_t = 0)]
+    member_id: u32,
 }
 
 pub fn get_position_anchor_discriminator() -> Vec<u8> {
@@ -175,8 +154,8 @@ async fn generate_accounts_filter_map(
                 owner: vec![],
                 filters: vec![],
                 nonempty_txn_signature: None,
-                },
-            );
+            },
+        );
     }
 
     let limit_order_book_owner = vec![adrena_abi::ID.to_string()];
@@ -207,8 +186,8 @@ async fn generate_accounts_filter_map(
                 owner: vec![],
                 filters: vec![],
                 nonempty_txn_signature: None,
-                },
-            );
+            },
+        );
     }
 
     // Price update v2 pdas - the price updates
@@ -242,212 +221,233 @@ async fn main() -> anyhow::Result<()> {
     env_logger::init();
 
     let args = Args::parse();
-    let zero_attempts = Arc::new(Mutex::new(true));
 
     // The array of indexed positions - These positions are the ones that we are watching for any updates from the stream and for SL/TP/LIQ conditions
     let indexed_positions: IndexedPositionsThreadSafe = Arc::new(RwLock::new(HashMap::new()));
-    // The array of indexed custodies - These are not directly observed, but are needed for instructions and to keep track of which price update v2 accounts are observed
     let indexed_custodies: IndexedCustodiesThreadSafe = Arc::new(RwLock::new(HashMap::new()));
     let indexed_limit_order_books: IndexedLimitOrderBooksThreadSafe = Arc::new(RwLock::new(HashMap::new()));
+    let priority_fees: PriorityFeesThreadSafe = Arc::new(RwLock::new(PriorityFees {
+        median: 0,
+        high: 0,
+        ultra: 0,
+    }));
 
-    // The default exponential backoff strategy intervals:
-    // [500ms, 750ms, 1.125s, 1.6875s, 2.53125s, 3.796875s, 5.6953125s,
-    // 8.5s, 12.8s, 19.2s, 28.8s, 43.2s, 64.8s, 97s, ... ]
-    retry(ExponentialBackoff::default(), move || {
-        let args = args.clone();
-        let zero_attempts = Arc::clone(&zero_attempts);
-        let indexed_positions = Arc::clone(&indexed_positions);
-        let indexed_custodies = Arc::clone(&indexed_custodies);
-        let indexed_limit_order_books = Arc::clone(&indexed_limit_order_books);
-        let mut periodical_priority_fees_fetching_task: Option<JoinHandle<Result<(), backoff::Error<anyhow::Error>>>> = None;
+    let mut periodical_priority_fees_fetching_task: Option<JoinHandle<anyhow::Result<()>>> = None;
 
-        async move {
-            // In case it errored out, abort the fee task (will be recreated)
-            if let Some(t) = periodical_priority_fees_fetching_task.take() {
-                t.abort();
+    loop {
+        // ////////////////////////////////////////////////////////////////
+        // The account filter map is what is provided to the subscription request
+        // to inform the server about the accounts we are interested in observing changes to
+        // ////////////////////////////////////////////////////////////////
+        log::info!("1 - Generate the accounts filter map...");
+        let accounts_filter_map =
+            generate_accounts_filter_map(&indexed_custodies, &indexed_positions, &indexed_limit_order_books).await;
+        log::info!("  <> Account filter map initialized");
+
+        // ////////////////////////////////////////////////////////////////
+        // Creating the Fumarole request from the accounts filter map
+        // ////////////////////////////////////////////////////////////////
+        log::info!("2 - Create the Fumarole request from the accounts filter map...");
+        let accounts: Vec<Pubkey> = accounts_filter_map
+            .values()
+            .flat_map(|filter| filter.account.iter().map(|addr| Pubkey::from_str(addr).unwrap()))
+            .collect();
+
+        let request = yellowstone_fumarole_client::SubscribeRequestBuilder::default()
+            .with_accounts(Some(accounts))
+            .build(args.consumer_group.clone());
+
+        // ////////////////////////////////////////////////////////////////
+        //  Open the connection to Fumarole
+        // ////////////////////////////////////////////////////////////////
+        log::info!("3 - Connect to Fumarole...");
+        let config = FumaroleConfig {
+            endpoint: args.endpoint.clone(),
+            x_token: args.x_token.clone(),
+            max_decoding_message_size_bytes: 512_000_000,
+            x_metadata: BTreeMap::new(),
+        };
+        let mut fumarole = match FumaroleClientBuilder::default().connect(config).await {
+            Ok(client) => client,
+            Err(e) => {
+                log::error!("Failed to connect to Fumarole: {:?}", e);
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                continue;
             }
+        };
 
-            let mut zero_attempts = zero_attempts.lock().await;
-            if *zero_attempts {
-                *zero_attempts = false;
-            } else {
-                log::info!("Retry to connect to the server");
+        // ////////////////////////////////////////////////////////////////
+        // Subscribe to the stream
+        // ////////////////////////////////////////////////////////////////
+        log::info!("4 - Subscribe to Fumarole request...");
+        let response = match fumarole.subscribe_with_request(request).await {
+            Ok(response) => response,
+            Err(e) => {
+                log::error!("Failed to subscribe to Fumarole: {:?}", e);
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                continue;
             }
-            drop(zero_attempts);
+        };
 
-            let commitment = args.get_commitment();
-            let mut grpc = args.connect().await.map_err(backoff::Error::transient)?;
+        // ////////////////////////////////////////////////////////////////
+        //  Process the stream
+        // ////////////////////////////////////////////////////////////////
+        log::info!("5 - Process Fumarole stream...");
+        let mut rx = response.into_inner();
 
-            let payer = read_keypair_file(args.payer_keypair.clone()).unwrap();
-            let payer = Arc::new(payer);
-            let client = Client::new(Cluster::Custom(args.endpoint.clone(), args.endpoint.clone()), Arc::clone(&payer));
-            let program = client.program(adrena_abi::ID).map_err(|e| backoff::Error::transient(e.into()))?;
-            log::info!("  <> gRPC, RPC clients connected!");
+        // In case it errored out, abort the fee task (will be recreated)
+        if let Some(t) = periodical_priority_fees_fetching_task.take() {
+            t.abort();
+        }
 
-            // Fetched once
-            let cortex: Cortex = program
-                .account::<Cortex>(adrena_abi::CORTEX_ID)
+        // ////////////////////////////////////////////////////////////////
+        //  Connect to the RPC and fetch the program accounts
+        // ////////////////////////////////////////////////////////////////
+        log::info!("6 - Connect to the RPC and fetch the program accounts...");
+        let payer = read_keypair_file(args.payer_keypair.clone()).unwrap();
+        let payer = Arc::new(payer);
+        let client = Client::new(
+            Cluster::Custom(args.endpoint.clone(), args.endpoint.clone()),
+            Arc::clone(&payer),
+        );
+        let program = client
+            .program(adrena_abi::ID)
+            .map_err(|e| anyhow::anyhow!("Failed to create program client: {}", e))?;
+
+        log::info!("  <> Fumarole, RPC clients connected!");
+
+        // Fetched once
+        let cortex: Cortex = program
+            .account::<Cortex>(adrena_abi::CORTEX_ID)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to fetch cortex: {e}"))?;
+
+        // Fetched once
+        let pool = program
+            .account::<Pool>(adrena_abi::MAIN_POOL_ID)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to fetch pool: {e}"))?;
+
+        // Index USDC custody once
+        let usdc_custody = program
+            .account::<adrena_abi::types::Custody>(USDC_CUSTODY_ID)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to fetch USDC custody: {e}"))?;
+        indexed_custodies.write().await.insert(USDC_CUSTODY_ID, usdc_custody);
+
+        // ////////////////////////////////////////////////////////////////
+        //  Retrieving and indexing existing positions and their custodies
+        // ////////////////////////////////////////////////////////////////
+        log::info!("7 - Retrieve and index existing positions and their custodies...");
+        {
+            let position_pda_filter = RpcFilterType::Memcmp(Memcmp::new_base58_encoded(0, &get_position_anchor_discriminator()));
+            let filters = vec![position_pda_filter];
+            let existing_positions_accounts = program
+                .accounts::<Position>(filters)
                 .await
-                .map_err(|e| backoff::Error::transient(e.into()))?;
+                .map_err(|e| anyhow::anyhow!("Failed to fetch existing positions: {e}"))?;
+            // Extend the indexed positions map with the existing positions
+            indexed_positions.write().await.extend(existing_positions_accounts);
+            log::info!(
+                "  <> # of existing positions parsed and loaded: {}",
+                indexed_positions.read().await.len()
+            );
+        }
 
-            // Fetched once
-            let pool = program
-                .account::<Pool>(adrena_abi::MAIN_POOL_ID)
+        // ////////////////////////////////////////////////////////////////
+        //  Retrieving and indexing existing limit order books
+        // ////////////////////////////////////////////////////////////////
+        log::info!("8 - Retrieve and index existing limit order books...");
+        {
+            let limit_order_book_pda_filter =
+                RpcFilterType::Memcmp(Memcmp::new_base58_encoded(0, &get_limit_order_book_anchor_discriminator()));
+            let filters = vec![limit_order_book_pda_filter];
+            let existing_limit_order_book_accounts = program
+                .accounts::<LimitOrderBook>(filters)
                 .await
-                .map_err(|e| backoff::Error::transient(e.into()))?;
-
-            // Index USDC custody once
-            let usdc_custody = program
-                .account::<adrena_abi::types::Custody>(USDC_CUSTODY_ID)
+                .map_err(|e| anyhow::anyhow!("Failed to fetch existing limit order books: {e}"))?;
+            // Extend the indexed limit order books map with the existing limit order books
+            indexed_limit_order_books
+                .write()
                 .await
-                .map_err(|e| backoff::Error::transient(e.into()))?;
-            indexed_custodies.write().await.insert(USDC_CUSTODY_ID, usdc_custody);
+                .extend(existing_limit_order_book_accounts);
+            log::info!(
+                "  <> # of existing limit order books parsed and loaded: {}",
+                indexed_limit_order_books.read().await.len()
+            );
+        }
 
-            // ////////////////////////////////////////////////////////////////
-            log::info!("1 - Retrieving and indexing existing positions and their custodies...");
-            {
-                let position_pda_filter = RpcFilterType::Memcmp(Memcmp::new_base58_encoded(0, &get_position_anchor_discriminator()));
-                let filters = vec![position_pda_filter];
-                let existing_positions_accounts = program
-                    .accounts::<Position>(filters)
-                    .await
-                    .map_err(|e| backoff::Error::transient(e.into()))?;
-                // Extend the indexed positions map with the existing positions
-                indexed_positions.write().await.extend(existing_positions_accounts);
-                log::info!("  <> # of existing positions parsed and loaded: {}", indexed_positions.read().await.len());
-            }
+        // ////////////////////////////////////////////////////////////////
+        //  Update the indexed custodies map based on the indexed positions
+        // ////////////////////////////////////////////////////////////////
+        log::info!("9 - Update the indexed custodies map based on the indexed positions...");
+        if let Err(e) =
+            update_indexed_custodies(&program, &indexed_positions, &indexed_limit_order_books, &indexed_custodies).await
+        {
+            log::error!("Failed to update indexed custodies: {:?}", e);
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            continue;
+        }
+        // ////////////////////////////////////////////////////////////////
 
-            log::info!("2 - Retrieving and indexing existing limit order books...");
-            {
-                let limit_order_book_pda_filter = RpcFilterType::Memcmp(Memcmp::new_base58_encoded(0, &get_limit_order_book_anchor_discriminator()));
-                let filters = vec![limit_order_book_pda_filter];
-                let existing_limit_order_book_accounts = program
-                    .accounts::<LimitOrderBook>(filters)
-                    .await
-                    .map_err(|e| backoff::Error::transient(e.into()))?;
-                // Extend the indexed limit order books map with the existing limit order books
-                indexed_limit_order_books.write().await.extend(existing_limit_order_book_accounts);
-                log::info!("  <> # of existing limit order books parsed and loaded: {}", indexed_limit_order_books.read().await.len());
-            }
+        // ////////////////////////////////////////////////////////////////
+        // Side thread to fetch the median priority fee every 5 seconds
+        // ////////////////////////////////////////////////////////////////
+        log::info!("10 - Spawn a task to poll priority fees every 5 seconds...");
+        periodical_priority_fees_fetching_task = Some({
+            let priority_fees = Arc::clone(&priority_fees);
+            let endpoint = args.endpoint.clone();
+            let payer = Arc::clone(&payer);
 
-            // Update the indexed custodies map based on the indexed positions
-            update_indexed_custodies(&program, &indexed_positions, &indexed_limit_order_books, &indexed_custodies).await?;
-            // ////////////////////////////////////////////////////////////////
+            tokio::spawn(async move {
+                let client = Client::new(Cluster::Custom(endpoint.clone(), endpoint), payer);
+                let mut fee_refresh_interval = interval(PRIORITY_FEE_REFRESH_INTERVAL);
+                loop {
+                    fee_refresh_interval.tick().await;
+                    let mut priority_fees_write = priority_fees.write().await;
 
-            // ////////////////////////////////////////////////////////////////
-            // The account filter map is what is provided to the subscription request
-            // to inform the server about the accounts we are interested in observing changes to
-            // ////////////////////////////////////////////////////////////////
-            log::info!("3 - Generate subscription request and open stream...");
-            let accounts_filter_map = generate_accounts_filter_map(&indexed_custodies, &indexed_positions, &indexed_limit_order_books).await;
-            log::info!("  <> Account filter map initialized");
-            let (mut subscribe_tx, mut stream) = {
-                let request = SubscribeRequest {
-                    ping: None, //Some(SubscribeRequestPing { id: 1 }),
-                    accounts: accounts_filter_map,
-                    commitment: commitment.map(|c| c.into()),
-                    ..Default::default()
-                };
-                log::debug!("  <> Sending subscription request: {:?}", request);
-                let (subscribe_tx, stream) = grpc
-                    .subscribe_with_request(Some(request))
-                    .await
-                    .map_err(|e| backoff::Error::transient(e.into()))?;
-                log::info!("  <> stream opened");
-                (subscribe_tx, stream)
-            };
-
-            // ////////////////////////////////////////////////////////////////
-            // Side thread to fetch the median priority fee every 5 seconds
-            // ////////////////////////////////////////////////////////////////
-            let priority_fees = Arc::new(RwLock::new(PriorityFees {
-                median: 0,
-                high: 0, 
-                ultra: 0,
-            }));
-            // Spawn a task to poll priority fees every 5 seconds
-            log::info!("4 - Spawn a task to poll priority fees every 5 seconds...");
-            #[allow(unused_assignments)]
-            {
-            periodical_priority_fees_fetching_task = Some({
-                let priority_fees = Arc::clone(&priority_fees);
-                
-                tokio::spawn(async move {
-                    let mut fee_refresh_interval = interval(PRIORITY_FEE_REFRESH_INTERVAL);
-                    loop {
-                        fee_refresh_interval.tick().await;
-                        let mut priority_fees_write = priority_fees.write().await;
-                        
-                        if let Ok(fee) = fetch_mean_priority_fee(&client, MEDIAN_PRIORITY_FEE_PERCENTILE).await {
-                            priority_fees_write.median = fee;
-                        }
-                        if let Ok(fee) = fetch_mean_priority_fee(&client, HIGH_PRIORITY_FEE_PERCENTILE).await {
-                            priority_fees_write.high = fee;
-                        }
-                        if let Ok(fee) = fetch_mean_priority_fee(&client, ULTRA_PRIORITY_FEE_PERCENTILE).await {
-                            priority_fees_write.ultra = fee;
-                        }
+                    if let Ok(fee) = fetch_mean_priority_fee(&client, MEDIAN_PRIORITY_FEE_PERCENTILE).await {
+                        priority_fees_write.median = fee;
                     }
-                })
-            });
-            }
-
-            // ////////////////////////////////////////////////////////////////
-            // CORE LOOP
-            //
-            // Here we wait for new messages from the stream and process them
-            // if coming from the price update v2 accounts, we check for
-            // liquidation/sl/tp conditions on the already indexed positions if
-            // coming from the position accounts, we update the indexed positions map
-            // ////////////////////////////////////////////////////////////////
-            log::info!("5 - Start core loop: processing gRPC stream...");
-            loop {
-                match timeout(Duration::from_secs(11), stream.next()).await {
-                    Ok(Some(message)) => {
-                        match process_stream_message(
-                            message.map_err(|e| backoff::Error::transient(e.into())),
-                            &indexed_positions,
-                            &indexed_custodies,
-                            &indexed_limit_order_books,
-                            &payer,
-                            &args.endpoint.clone(),
-                            &cortex,
-                            &pool,
-                            &mut subscribe_tx,
-                            &priority_fees,
-                        )
-                        .await
-                        {
-                            Ok(_) => continue,
-                            Err(backoff::Error::Permanent(e)) => {
-                                log::error!("Permanent error: {:?}", e);
-                                break;
-                            }
-                            Err(backoff::Error::Transient { err, .. }) => {
-                                log::warn!("Transient error: {:?}", err);
-                                // Handle transient error without breaking the loop
-                            }
-                        }
+                    if let Ok(fee) = fetch_mean_priority_fee(&client, HIGH_PRIORITY_FEE_PERCENTILE).await {
+                        priority_fees_write.high = fee;
                     }
-                    Ok(None) => {
-                        log::warn!("Stream closed by server - restarting connection");
-                        return Err(backoff::Error::transient(anyhow::anyhow!("Server Closed Connection")));
-                    }
-                    Err(_) => {
-                        log::warn!(
-                            "No message received in 11 seconds, restarting connection (we should be getting at least a ping every 10 seconds)"
-                        );
-                        return Err(backoff::Error::transient(anyhow::anyhow!("Timeout")));
+                    if let Ok(fee) = fetch_mean_priority_fee(&client, ULTRA_PRIORITY_FEE_PERCENTILE).await {
+                        priority_fees_write.ultra = fee;
                     }
                 }
+            })
+        });
+
+        // ////////////////////////////////////////////////////////////////
+        // CORE LOOP
+        //
+        // Here we wait for new messages from the stream and process them
+        // if coming from the price update v2 accounts, we check for
+        // liquidation/sl/tp conditions on the already indexed positions if
+        // coming from the position accounts, we update the indexed positions map
+        // ////////////////////////////////////////////////////////////////
+        log::info!("11 - Start core loop: process Fumarole stream...");
+        while let Ok(Some(message)) = timeout(Duration::from_secs(11), rx.next()).await {
+            if let Err(e) = process_stream_message(
+                message.map_err(|e| backoff::Error::transient(anyhow::anyhow!("Stream error: {}", e))),
+                &indexed_positions,
+                &indexed_custodies,
+                &indexed_limit_order_books,
+                &payer,
+                &args.endpoint,
+                &cortex,
+                &pool,
+                &priority_fees,
+            )
+            .await
+            {
+                log::error!("Error processing message: {:?}", e);
+                break;
             }
-
-            log::debug!("  <> stream closed");
-
-            Ok::<(), backoff::Error<anyhow::Error>>(())
         }
-        .inspect_err(|error| log::error!("failed to connect: {error}"))
-    })
-    .await
-    .map_err(Into::into)
+
+        log::info!("Connection lost, reconnecting in 5 seconds...");
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
 }

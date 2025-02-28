@@ -33,8 +33,8 @@ solana-client = "2.0.18"
 solana-account-decoder = "2.0.18"
 tokio = { version = "1.21.2", features = ["rt-multi-thread"] }
 tonic = "0.12.3"
-yellowstone-grpc-client = "4.0.0"
-yellowstone-grpc-proto = { version = "4.0.0", default-features = true }
+yellowstone-fumarole-client = "0.1.1-pre.2"
+yellowstone-grpc-proto = { version = "5.0.0", default-features = true }
 sha2 = "0.10.8"
 num-traits = "0.2.19"
 adrena-abi = { git = "https://github.com/AdrenaFoundation/adrena-abi.git", rev = "5adb012b2f22d086c70d8fa97f08b68db75c49ed" } # 1.1.9
@@ -46,6 +46,7 @@ anchor-client = { git = "https://github.com/coral-xyz/anchor.git", rev = "045367
 spl-associated-token-account = { version = "6.0.0", features = [
     "no-entrypoint",
 ] }
+uuid = { version = "1.7.0", features = ["v4"] }
 
 [profile.release]
 lto = true
