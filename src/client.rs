@@ -14,7 +14,6 @@ use {
     std::{
         collections::{BTreeMap, HashMap},
         env,
-        str::FromStr,
         sync::Arc,
         time::Duration,
     },
@@ -23,7 +22,7 @@ use {
         task::JoinHandle,
         time::{interval, timeout},
     },
-    yellowstone_fumarole_client::{config::FumaroleConfig, FumaroleClientBuilder},
+    yellowstone_fumarole_client::{config::FumaroleConfig, proto, FumaroleClientBuilder},
     yellowstone_grpc_proto::{
         geyser::{
             subscribe_request_filter_accounts_filter::Filter as AccountsFilterDataOneof,
@@ -78,8 +77,16 @@ struct Args {
     endpoint: String,
 
     #[clap(long)]
-    /// Auth token for Fumarole service
+    /// Fumarole endpoint
+    fumarole_endpoint: String,
+
+    #[clap(long)]
+    /// Auth token for Service endpoint
     x_token: Option<String>,
+
+    #[clap(long)]
+    /// Auth token for Fumarole service
+    fumarole_x_token: Option<String>,
 
     /// Path to the payer keypair
     #[clap(long)]
@@ -247,23 +254,22 @@ async fn main() -> anyhow::Result<()> {
         // ////////////////////////////////////////////////////////////////
         // Creating the Fumarole request from the accounts filter map
         // ////////////////////////////////////////////////////////////////
-        log::info!("2 - Create the Fumarole request from the accounts filter map...");
-        let accounts: Vec<Pubkey> = accounts_filter_map
-            .values()
-            .flat_map(|filter| filter.account.iter().map(|addr| Pubkey::from_str(addr).unwrap()))
-            .collect();
+        log::info!("2 - Create the SuscribeRequest from the accounts filter map...");
 
-        let request = yellowstone_fumarole_client::SubscribeRequestBuilder::default()
-            .with_accounts(Some(accounts))
-            .build(args.consumer_group.clone());
+        let request = proto::SubscribeRequest {
+            consumer_group_label: args.consumer_group.clone(),
+            consumer_id: Some(args.member_id),
+            accounts: accounts_filter_map,
+            transactions: HashMap::new(),
+        };
 
         // ////////////////////////////////////////////////////////////////
         //  Open the connection to Fumarole
         // ////////////////////////////////////////////////////////////////
         log::info!("3 - Connect to Fumarole...");
         let config = FumaroleConfig {
-            endpoint: args.endpoint.clone(),
-            x_token: args.x_token.clone(),
+            endpoint: args.fumarole_endpoint.clone(),
+            x_token: args.fumarole_x_token.clone(),
             max_decoding_message_size_bytes: 512_000_000,
             x_metadata: BTreeMap::new(),
         };

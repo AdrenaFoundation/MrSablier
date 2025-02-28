@@ -63,7 +63,6 @@ pub async fn process_stream_message(
                     )
                     .await?;
                 }
-
                 if msg.filters.contains(&"positions_create_update".to_owned()) {
                     let update = update_indexed_positions(&account_key, &account_data, indexed_positions).await?;
 
