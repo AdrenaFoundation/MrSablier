@@ -45,7 +45,7 @@ pub async fn update_indexed_limit_order_books(
 ) -> Result<LimitOrderBookUpdate, backoff::Error<anyhow::Error>> {
     let mut limit_order_books = indexed_limit_order_books.write().await;
 
-    if limit_order_book_account_data.is_empty() || limit_order_book_account_lamports == 0 {
+    if limit_order_book_account_lamports == 0 || limit_order_book_account_data.is_empty() {
         limit_order_books.remove(limit_order_book_account_key);
         return Ok(LimitOrderBookUpdate::Closed);
     }
