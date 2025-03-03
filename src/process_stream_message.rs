@@ -129,8 +129,13 @@ where
                             }
                         }
                     } else if msg.filters.contains(&"limit_order_books_create_update".to_owned()) {
-                        let update =
-                            update_indexed_limit_order_books(&account_key, &account_data, indexed_limit_order_books).await?;
+                        let update = update_indexed_limit_order_books(
+                            &account_key,
+                            &account_data,
+                            account.lamports,
+                            indexed_limit_order_books,
+                        )
+                        .await?;
 
                         match update {
                             LimitOrderBookUpdate::Created(_new_limit_order_book) => {
@@ -147,8 +152,13 @@ where
                             }
                         }
                     } else if msg.filters.contains(&"limit_order_books_close".to_owned()) {
-                        let update =
-                            update_indexed_limit_order_books(&account_key, &account_data, indexed_limit_order_books).await?;
+                        let update = update_indexed_limit_order_books(
+                            &account_key,
+                            &account_data,
+                            account.lamports,
+                            indexed_limit_order_books,
+                        )
+                        .await?;
 
                         match update {
                             LimitOrderBookUpdate::Created(_) => {
