@@ -1,9 +1,9 @@
 use {
     crate::{
-        process_stream_message::{LimitOrderBookUpdate, PositionUpdate},
-        IndexedCustodiesThreadSafe, IndexedLimitOrderBooksThreadSafe, IndexedPositionsThreadSafe,
+        process_stream_message::{LimitOrderBookUpdate, PositionUpdate, UserProfileUpdate},
+        IndexedCustodiesThreadSafe, IndexedLimitOrderBooksThreadSafe, IndexedPositionsThreadSafe, IndexedUserProfilesThreadSafe,
     },
-    adrena_abi::{AccountDeserialize, LimitOrderBook, Position},
+    adrena_abi::{AccountDeserialize, LimitOrderBook, Position, UserProfile},
     solana_sdk::{pubkey::Pubkey, signature::Keypair},
     std::{collections::HashSet, sync::Arc},
 };
@@ -34,6 +34,30 @@ pub async fn update_indexed_positions(
         Ok(PositionUpdate::Created(position))
     } else {
         Ok(PositionUpdate::Modified(position))
+    }
+}
+
+pub async fn update_indexed_user_profiles(
+    user_profile_account_key: &Pubkey,
+    user_profile_account_data: &[u8],
+    indexed_user_profiles: &IndexedUserProfilesThreadSafe,
+) -> Result<UserProfileUpdate, backoff::Error<anyhow::Error>> {
+    let mut user_profiles = indexed_user_profiles.write().await;
+
+    if user_profile_account_data.is_empty() {
+        user_profiles.remove(user_profile_account_key);
+        return Ok(UserProfileUpdate::Closed);
+    }
+
+    let user_profile =
+        UserProfile::try_deserialize(&mut &user_profile_account_data[..]).map_err(|e| backoff::Error::transient(e.into()))?;
+
+    let is_new_user_profile = user_profiles.insert(*user_profile_account_key, user_profile).is_none();
+
+    if is_new_user_profile {
+        Ok(UserProfileUpdate::Created(user_profile))
+    } else {
+        Ok(UserProfileUpdate::Modified(user_profile))
     }
 }
 

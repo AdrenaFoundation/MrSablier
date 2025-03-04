@@ -37,7 +37,7 @@ yellowstone-grpc-client = "4.0.0"
 yellowstone-grpc-proto = { version = "4.0.0", default-features = true }
 sha2 = "0.10.8"
 num-traits = "0.2.19"
-adrena-abi = { git = "https://github.com/AdrenaFoundation/adrena-abi.git", rev = "5adb012b2f22d086c70d8fa97f08b68db75c49ed" } # 1.1.9
+adrena-abi = { git = "https://github.com/AdrenaFoundation/adrena-abi.git", rev = "ed36b555a5382e72e75dc819733ac2fdf2a294be" } # 1.1.10
 # anchor-client = { version = "0.29.0", features = ["async"] }
 # Waiting for 0.31.0 release - includes a fix on the async - https://github.com/coral-xyz/anchor/pull/3057
 anchor-client = { git = "https://github.com/coral-xyz/anchor.git", rev = "04536725c2ea16329e84bcfe3200afd47eeeb464", features = [

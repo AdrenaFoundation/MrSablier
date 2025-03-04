@@ -1,13 +1,10 @@
 use {
     crate::{
-        handlers::{
-            create_liquidate_short_ix, liquidate_long::calculate_fee_risk_adjusted_position_fees,
-        },
+        handlers::{create_liquidate_short_ix, liquidate_long::calculate_fee_risk_adjusted_position_fees},
         IndexedCustodiesThreadSafe, PriorityFeesThreadSafe, LIQUIDATE_SHORT_CU_LIMIT,
     },
     adrena_abi::{
-        main_pool::USDC_CUSTODY_ID, oracle_price::OraclePrice, types::Cortex, LeverageCheckStatus,
-        Pool, Position, ADX_MINT, ALP_MINT, SPL_ASSOCIATED_TOKEN_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID,
+        oracle_price::OraclePrice, LeverageCheckStatus, Pool, Position, SPL_ASSOCIATED_TOKEN_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID,
     },
     anchor_client::Program,
     solana_client::rpc_config::RpcSendTransactionConfig,
@@ -22,17 +19,16 @@ pub async fn liquidate_short(
     oracle_price: &OraclePrice,
     indexed_custodies: &IndexedCustodiesThreadSafe,
     program: &Program<Arc<Keypair>>,
-    cortex: &Cortex,
     pool: &Pool,
     priority_fees: &PriorityFeesThreadSafe,
+    user_profile: Option<Pubkey>,
+    referrer_profile: Option<Pubkey>,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
     let current_time = chrono::Utc::now().timestamp();
 
     let indexed_custodies_read = indexed_custodies.read().await;
     let custody = indexed_custodies_read.get(&position.custody).unwrap();
-    let collateral_custody = indexed_custodies_read
-        .get(&position.collateral_custody)
-        .unwrap();
+    let collateral_custody = indexed_custodies_read.get(&position.collateral_custody).unwrap();
 
     // here we use the USDC price of 1 for simplicity
     let mock_collateral_token_price = OraclePrice::new(1_000_000, -6, 0);
@@ -51,11 +47,7 @@ pub async fn liquidate_short(
         LeverageCheckStatus::Ok(leverage) => {
             if leverage > 2_500_000 {
                 // 250x
-                log::info!(
-                    "  <*> Position {} nearing liquidation: {}",
-                    position_key,
-                    leverage
-                );
+                log::info!("  <*> Position {} nearing liquidation: {}", position_key, leverage);
                 return Ok(());
             }
             // Silently return if leverage is below
@@ -73,10 +65,7 @@ pub async fn liquidate_short(
 
     let indexed_custodies_read = indexed_custodies.read().await;
     let custody = indexed_custodies_read.get(&position.custody).unwrap();
-    let collateral_custody = indexed_custodies_read
-        .get(&position.collateral_custody)
-        .unwrap();
-    let staking_reward_token_custody = indexed_custodies_read.get(&USDC_CUSTODY_ID).unwrap();
+    let collateral_custody = indexed_custodies_read.get(&position.collateral_custody).unwrap();
 
     let collateral_mint = collateral_custody.mint;
 
@@ -91,8 +80,6 @@ pub async fn liquidate_short(
     .0;
 
     let transfer_authority_pda = adrena_abi::pda::get_transfer_authority_pda().0;
-    let lm_staking = adrena_abi::pda::get_staking_pda(&ADX_MINT).0;
-    let lp_staking = adrena_abi::pda::get_staking_pda(&ALP_MINT).0;
 
     let (liquidate_short_ix, liquidate_short_accounts) = create_liquidate_short_ix(
         &program.payer(),
@@ -100,26 +87,18 @@ pub async fn liquidate_short(
         position,
         receiving_account,
         transfer_authority_pda,
-        lm_staking,
-        lp_staking,
-        cortex,
-        staking_reward_token_custody,
         custody,
+        user_profile,
+        referrer_profile,
         collateral_custody,
     );
 
-    let (_, priority_fee) =
-        calculate_fee_risk_adjusted_position_fees(&position, &indexed_custodies, &priority_fees)
-            .await?;
+    let (_, priority_fee) = calculate_fee_risk_adjusted_position_fees(&position, &indexed_custodies, &priority_fees).await?;
 
     let tx = program
         .request()
-        .instruction(ComputeBudgetInstruction::set_compute_unit_price(
-            priority_fee,
-        ))
-        .instruction(ComputeBudgetInstruction::set_compute_unit_limit(
-            LIQUIDATE_SHORT_CU_LIMIT,
-        ))
+        .instruction(ComputeBudgetInstruction::set_compute_unit_price(priority_fee))
+        .instruction(ComputeBudgetInstruction::set_compute_unit_limit(LIQUIDATE_SHORT_CU_LIMIT))
         .instruction(create_associated_token_account_idempotent(
             &program.payer(),
             &position.owner,
