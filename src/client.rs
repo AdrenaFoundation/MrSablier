@@ -8,7 +8,6 @@ use {
     anchor_client::{solana_sdk::signer::keypair::read_keypair_file, Client, Cluster},
     clap::Parser,
     futures::StreamExt,
-    priority_fees::fetch_mean_priority_fee,
     solana_client::rpc_filter::{Memcmp, RpcFilterType},
     solana_sdk::pubkey::Pubkey,
     std::{
@@ -17,11 +16,7 @@ use {
         sync::Arc,
         time::Duration,
     },
-    tokio::{
-        sync::RwLock,
-        task::JoinHandle,
-        time::{interval, timeout},
-    },
+    tokio::{sync::RwLock, task::JoinHandle, time::timeout},
     yellowstone_fumarole_client::{config::FumaroleConfig, proto, FumaroleClientBuilder},
     yellowstone_grpc_proto::{
         geyser::{
@@ -32,19 +27,23 @@ use {
     },
 };
 
+// Thread-safe types
 type AccountFilterMap = HashMap<String, SubscribeRequestFilterAccounts>;
-
 type IndexedPositionsThreadSafe = Arc<RwLock<HashMap<Pubkey, adrena_abi::types::Position>>>;
 type IndexedCustodiesThreadSafe = Arc<RwLock<HashMap<Pubkey, adrena_abi::types::Custody>>>;
 type IndexedLimitOrderBooksThreadSafe = Arc<RwLock<HashMap<Pubkey, adrena_abi::types::LimitOrderBook>>>;
 type PriorityFeesThreadSafe = Arc<RwLock<PriorityFees>>;
-// https://solscan.io/account/rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ
+type SolPriceThreadSafe = Arc<RwLock<f64>>;
+
+// Constants
 pub const PYTH_RECEIVER_PROGRAM: &str = "rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ";
 
+// Modules
 pub mod evaluate_and_run_automated_orders;
 pub mod handlers;
 pub mod priority_fees;
 pub mod process_stream_message;
+pub mod sol_price;
 pub mod update_indexes;
 pub mod utils;
 
@@ -52,7 +51,6 @@ const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:10000";
 const MEDIAN_PRIORITY_FEE_PERCENTILE: u64 = 5000; // 50th
 const HIGH_PRIORITY_FEE_PERCENTILE: u64 = 7000; // 70th
 const ULTRA_PRIORITY_FEE_PERCENTILE: u64 = 9000; // 90th
-const PRIORITY_FEE_REFRESH_INTERVAL: Duration = Duration::from_secs(5); // seconds
 pub const CLOSE_POSITION_LONG_CU_LIMIT: u32 = 385_000;
 pub const CLOSE_POSITION_SHORT_CU_LIMIT: u32 = 285_000;
 pub const CLEANUP_POSITION_CU_LIMIT: u32 = 60_000;
@@ -229,7 +227,7 @@ async fn main() -> anyhow::Result<()> {
 
     let args = Args::parse();
 
-    // The array of indexed positions - These positions are the ones that we are watching for any updates from the stream and for SL/TP/LIQ conditions
+    // The indexed positions structure is a map of position pubkey -> position
     let indexed_positions: IndexedPositionsThreadSafe = Arc::new(RwLock::new(HashMap::new()));
     let indexed_custodies: IndexedCustodiesThreadSafe = Arc::new(RwLock::new(HashMap::new()));
     let indexed_limit_order_books: IndexedLimitOrderBooksThreadSafe = Arc::new(RwLock::new(HashMap::new()));
@@ -239,8 +237,16 @@ async fn main() -> anyhow::Result<()> {
         ultra: 0,
     }));
 
+    // Initialize SOL price tracking
+    let sol_price: SolPriceThreadSafe = Arc::new(RwLock::new(150.0)); // Default price
+
+    // Process message handling loop
     let mut periodical_priority_fees_fetching_task: Option<JoinHandle<anyhow::Result<()>>> = None;
 
+    // Initialize SOL price tracking task
+    let mut sol_price_update_task: Option<JoinHandle<()>> = None;
+
+    // Main loop
     loop {
         // ////////////////////////////////////////////////////////////////
         // The account filter map is what is provided to the subscription request
@@ -303,6 +309,11 @@ async fn main() -> anyhow::Result<()> {
 
         // In case it errored out, abort the fee task (will be recreated)
         if let Some(t) = periodical_priority_fees_fetching_task.take() {
+            t.abort();
+        }
+
+        // Also abort the SOL price task if it exists
+        if let Some(t) = sol_price_update_task.take() {
             t.abort();
         }
 
@@ -400,30 +411,20 @@ async fn main() -> anyhow::Result<()> {
         // Side thread to fetch the median priority fee every 5 seconds
         // ////////////////////////////////////////////////////////////////
         log::info!("10 - Spawn a task to poll priority fees every 5 seconds...");
-        periodical_priority_fees_fetching_task = Some({
-            let priority_fees = Arc::clone(&priority_fees);
-            let endpoint = args.endpoint.clone();
-            let payer = Arc::clone(&payer);
+        periodical_priority_fees_fetching_task = Some(priority_fees::start_priority_fees_updates(
+            args.endpoint.clone(),
+            Arc::clone(&priority_fees),
+        ));
 
-            tokio::spawn(async move {
-                let client = Client::new(Cluster::Custom(endpoint.clone(), endpoint), payer);
-                let mut fee_refresh_interval = interval(PRIORITY_FEE_REFRESH_INTERVAL);
-                loop {
-                    fee_refresh_interval.tick().await;
-                    let mut priority_fees_write = priority_fees.write().await;
-
-                    if let Ok(fee) = fetch_mean_priority_fee(&client, MEDIAN_PRIORITY_FEE_PERCENTILE).await {
-                        priority_fees_write.median = fee;
-                    }
-                    if let Ok(fee) = fetch_mean_priority_fee(&client, HIGH_PRIORITY_FEE_PERCENTILE).await {
-                        priority_fees_write.high = fee;
-                    }
-                    if let Ok(fee) = fetch_mean_priority_fee(&client, ULTRA_PRIORITY_FEE_PERCENTILE).await {
-                        priority_fees_write.ultra = fee;
-                    }
-                }
-            })
-        });
+        // ////////////////////////////////////////////////////////////////
+        // Start a task that fetches SOL price every 20 seconds
+        // This is used for calculating liquidation fees in USD terms
+        // ////////////////////////////////////////////////////////////////
+        log::info!("11 - Spawn a task to poll SOL price every 20 seconds...");
+        sol_price_update_task = Some(sol_price::start_sol_price_update_task(
+            args.endpoint.clone(),
+            Arc::clone(&sol_price),
+        ));
 
         // ////////////////////////////////////////////////////////////////
         // CORE LOOP
@@ -433,7 +434,7 @@ async fn main() -> anyhow::Result<()> {
         // liquidation/sl/tp conditions on the already indexed positions if
         // coming from the position accounts, we update the indexed positions map
         // ////////////////////////////////////////////////////////////////
-        log::info!("11 - Start core loop: process Fumarole stream...");
+        log::info!("12 - Start core loop: process Fumarole stream...");
         while let Ok(Some(message)) = timeout(Duration::from_secs(11), rx.next()).await {
             if let Err(e) = process_stream_message(
                 message.map_err(|e| backoff::Error::transient(anyhow::anyhow!("Stream error: {}", e))),
@@ -445,6 +446,7 @@ async fn main() -> anyhow::Result<()> {
                 &cortex,
                 &pool,
                 &priority_fees,
+                &sol_price,
             )
             .await
             {

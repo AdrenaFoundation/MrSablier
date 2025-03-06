@@ -19,6 +19,7 @@ use {
     },
     spl_associated_token_account::instruction::create_associated_token_account_idempotent,
     std::{sync::Arc, time::Duration},
+    tokio::sync::RwLock,
 };
 
 pub async fn liquidate_long(
@@ -30,6 +31,7 @@ pub async fn liquidate_long(
     cortex: &Cortex,
     pool: &Pool,
     priority_fees: &PriorityFeesThreadSafe,
+    sol_price: &Arc<RwLock<f64>>,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
     let current_time = chrono::Utc::now().timestamp();
 
@@ -131,6 +133,7 @@ pub async fn liquidate_long(
         initial_priority_fee,
         5, // number of attempts to send the transaction, makes gradual steps
         unrealized_loss_usd,
+        sol_price,
     )
     .await?;
 
@@ -219,26 +222,35 @@ pub async fn send_transaction_with_fee_escalation(
     initial_fee: u64,
     max_attempts: u32,
     unrealized_loss_usd: u64,
+    sol_price: &Arc<RwLock<f64>>,
 ) -> Result<Signature, backoff::Error<anyhow::Error>> {
     let mut current_fee = initial_fee;
     let mut attempt = 0;
 
+    // Get the current SOL price
+    let sol_price_value = *sol_price.read().await;
+
     // Calculate max fee as 1% of unrealized loss
     let max_fee = {
-        let loss_in_sol = unrealized_loss_usd as f64 / (158.0 * 1_000_000.0); // TODO: retrieve SOL price from oracle
+        let loss_in_sol = unrealized_loss_usd as f64 / (sol_price_value * 1_000_000.0); // Convert USD to SOL using actual price
         let one_percent = loss_in_sol / 100.0;
         let micro_lamports = (one_percent * 1_000_000_000.0 * 1_000.0) as u64;
         micro_lamports / LIQUIDATE_LONG_CU_LIMIT as u64
     };
 
     // Calculate fee increase step to reach max_fee in 5 attempts to avoid spamming the network
-    let fee_step: u64 = (max_fee - initial_fee) / (max_attempts as u64);
+    let fee_step: u64 = if max_fee > initial_fee {
+        (max_fee - initial_fee) / (max_attempts as u64)
+    } else {
+        0 // If max_fee is less than initial_fee, don't increase
+    };
 
     log::info!(
-        "  <> Fee escalation strategy: initial: {}, step: {}, max: {}",
+        "  <> Fee escalation strategy: initial: {}, step: {}, max: {}, SOL price: ${:.2}",
         initial_fee,
         fee_step,
-        max_fee
+        max_fee,
+        sol_price_value
     );
 
     while attempt < max_attempts {

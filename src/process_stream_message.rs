@@ -3,6 +3,7 @@ use {
         evaluate_and_run_automated_orders::evaluate_and_run_automated_orders,
         update_indexes::{update_indexed_limit_order_books, update_indexed_positions},
         IndexedCustodiesThreadSafe, IndexedLimitOrderBooksThreadSafe, IndexedPositionsThreadSafe, PriorityFeesThreadSafe,
+        SolPriceThreadSafe,
     },
     adrena_abi::{
         types::{Cortex, Position},
@@ -36,6 +37,7 @@ pub async fn process_stream_message(
     cortex: &Cortex,
     pool: &Pool,
     priority_fees: &PriorityFeesThreadSafe,
+    sol_price: &SolPriceThreadSafe,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
     let program = Client::new(Cluster::Custom(endpoint.to_string(), endpoint.to_string()), Arc::clone(payer))
         .program(adrena_abi::ID)
@@ -60,6 +62,7 @@ pub async fn process_stream_message(
                         cortex,
                         pool,
                         priority_fees,
+                        sol_price,
                     )
                     .await?;
                 }
