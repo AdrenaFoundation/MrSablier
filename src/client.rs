@@ -1,10 +1,6 @@
 use {
     crate::{process_stream_message::process_stream_message, update_indexes::update_indexed_custodies},
-    adrena_abi::{
-        main_pool::USDC_CUSTODY_ID,
-        types::Position,
-        LimitOrderBook, Pool, UserProfile,
-    },
+    adrena_abi::{main_pool::USDC_CUSTODY_ID, types::Position, LimitOrderBook, Pool, UserProfile},
     anchor_client::{solana_sdk::signer::keypair::read_keypair_file, Client, Cluster},
     backoff::{future::retry, ExponentialBackoff},
     clap::Parser,
@@ -59,8 +55,8 @@ pub const CLOSE_POSITION_SHORT_CU_LIMIT: u32 = 285_000;
 pub const CLEANUP_POSITION_CU_LIMIT: u32 = 60_000;
 pub const LIQUIDATE_LONG_CU_LIMIT: u32 = 355_000;
 pub const LIQUIDATE_SHORT_CU_LIMIT: u32 = 256_000;
-pub const EXECUTE_LIMIT_ORDER_LONG_CU_LIMIT: u32 = 200_000; 
-pub const EXECUTE_LIMIT_ORDER_SHORT_CU_LIMIT: u32 = 200_000; 
+pub const EXECUTE_LIMIT_ORDER_LONG_CU_LIMIT: u32 = 200_000;
+pub const EXECUTE_LIMIT_ORDER_SHORT_CU_LIMIT: u32 = 200_000;
 
 #[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
 enum ArgsCommitment {
@@ -150,8 +146,7 @@ async fn generate_accounts_filter_map(
         indexed_limit_order_books.read().await.keys().map(|p| p.to_string()).collect();
 
     // Retrieve the existing user profiles keys - they are monitored for close events
-    let existing_user_profiles_keys: Vec<String> =
-    indexed_user_profiles.read().await.keys().map(|p| p.to_string()).collect();
+    let existing_user_profiles_keys: Vec<String> = indexed_user_profiles.read().await.keys().map(|p| p.to_string()).collect();
 
     // Create the accounts filter map (on all positions based on discriminator, and the above price update v2 pdas)
     let mut accounts_filter_map: AccountFilterMap = HashMap::new();
@@ -185,8 +180,8 @@ async fn generate_accounts_filter_map(
                 owner: vec![],
                 filters: vec![],
                 nonempty_txn_signature: None,
-                },
-            );
+            },
+        );
     }
 
     let limit_order_book_owner = vec![adrena_abi::ID.to_string()];
@@ -217,8 +212,8 @@ async fn generate_accounts_filter_map(
                 owner: vec![],
                 filters: vec![],
                 nonempty_txn_signature: None,
-                },
-            );
+            },
+        );
     }
 
     let user_profiles_owner = vec![adrena_abi::ID.to_string()];
@@ -230,12 +225,17 @@ async fn generate_accounts_filter_map(
         })),
     };
 
+    // Add a filter for user profile account size
+    let user_profiles_filter_datasize = SubscribeRequestFilterAccountsFilter {
+        filter: Some(AccountsFilterDataOneof::Datasize(408)), // Get only user profile V2
+    };
+
     accounts_filter_map.insert(
         "user_profiles_create_update".to_owned(),
         SubscribeRequestFilterAccounts {
             account: vec![],
             owner: user_profiles_owner,
-            filters: vec![user_profiles_filter_discriminator],
+            filters: vec![user_profiles_filter_discriminator, user_profiles_filter_datasize],
             nonempty_txn_signature: None,
         },
     );
@@ -371,7 +371,8 @@ async fn main() -> anyhow::Result<()> {
             log::info!("3 - Retrieving and indexing existing user profiles...");
             {
                 let user_profiles_pda_filter = RpcFilterType::Memcmp(Memcmp::new_base58_encoded(0, &get_user_profile_anchor_discriminator()));
-                let filters = vec![user_profiles_pda_filter];
+                let user_profiles_size_filter = RpcFilterType::DataSize(408); // 408-byte UserProfile V2 accounts
+                let filters = vec![user_profiles_pda_filter, user_profiles_size_filter];
                 let existing_user_profiles_accounts = program
                     .accounts::<UserProfile>(filters)
                     .await
@@ -413,7 +414,7 @@ async fn main() -> anyhow::Result<()> {
             // ////////////////////////////////////////////////////////////////
             let priority_fees = Arc::new(RwLock::new(PriorityFees {
                 median: 0,
-                high: 0, 
+                high: 0,
                 ultra: 0,
             }));
             // Spawn a task to poll priority fees every 5 seconds
@@ -422,13 +423,13 @@ async fn main() -> anyhow::Result<()> {
             {
             periodical_priority_fees_fetching_task = Some({
                 let priority_fees = Arc::clone(&priority_fees);
-                
+
                 tokio::spawn(async move {
                     let mut fee_refresh_interval = interval(PRIORITY_FEE_REFRESH_INTERVAL);
                     loop {
                         fee_refresh_interval.tick().await;
                         let mut priority_fees_write = priority_fees.write().await;
-                        
+
                         if let Ok(fee) = fetch_mean_priority_fee(&client, MEDIAN_PRIORITY_FEE_PERCENTILE).await {
                             priority_fees_write.median = fee;
                         }
