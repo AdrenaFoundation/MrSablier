@@ -1,10 +1,6 @@
 use {
     crate::{process_stream_message::process_stream_message, update_indexes::update_indexed_custodies},
-    adrena_abi::{
-        main_pool::USDC_CUSTODY_ID,
-        types::{Cortex, Position},
-        LimitOrderBook, Pool,
-    },
+    adrena_abi::{main_pool::USDC_CUSTODY_ID, types::Position, LimitOrderBook, Pool, UserProfile},
     anchor_client::{solana_sdk::signer::keypair::read_keypair_file, Client, Cluster},
     backoff::{future::retry, ExponentialBackoff},
     clap::Parser,
@@ -35,6 +31,7 @@ type AccountFilterMap = HashMap<String, SubscribeRequestFilterAccounts>;
 type IndexedPositionsThreadSafe = Arc<RwLock<HashMap<Pubkey, adrena_abi::types::Position>>>;
 type IndexedCustodiesThreadSafe = Arc<RwLock<HashMap<Pubkey, adrena_abi::types::Custody>>>;
 type IndexedLimitOrderBooksThreadSafe = Arc<RwLock<HashMap<Pubkey, adrena_abi::types::LimitOrderBook>>>;
+type IndexedUserProfilesThreadSafe = Arc<RwLock<HashMap<Pubkey, adrena_abi::types::UserProfile>>>;
 type PriorityFeesThreadSafe = Arc<RwLock<PriorityFees>>;
 // https://solscan.io/account/rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ
 pub const PYTH_RECEIVER_PROGRAM: &str = "rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ";
@@ -58,8 +55,8 @@ pub const CLOSE_POSITION_SHORT_CU_LIMIT: u32 = 285_000;
 pub const CLEANUP_POSITION_CU_LIMIT: u32 = 60_000;
 pub const LIQUIDATE_LONG_CU_LIMIT: u32 = 355_000;
 pub const LIQUIDATE_SHORT_CU_LIMIT: u32 = 256_000;
-pub const EXECUTE_LIMIT_ORDER_LONG_CU_LIMIT: u32 = 200_000; 
-pub const EXECUTE_LIMIT_ORDER_SHORT_CU_LIMIT: u32 = 200_000; 
+pub const EXECUTE_LIMIT_ORDER_LONG_CU_LIMIT: u32 = 200_000;
+pub const EXECUTE_LIMIT_ORDER_SHORT_CU_LIMIT: u32 = 200_000;
 
 #[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
 enum ArgsCommitment {
@@ -123,10 +120,15 @@ pub fn get_limit_order_book_anchor_discriminator() -> Vec<u8> {
     utils::derive_discriminator("LimitOrderBook").to_vec()
 }
 
+pub fn get_user_profile_anchor_discriminator() -> Vec<u8> {
+    utils::derive_discriminator("UserProfile").to_vec()
+}
+
 async fn generate_accounts_filter_map(
     indexed_custodies: &IndexedCustodiesThreadSafe,
     indexed_positions: &IndexedPositionsThreadSafe,
     indexed_limit_order_books: &IndexedLimitOrderBooksThreadSafe,
+    indexed_user_profiles: &IndexedUserProfilesThreadSafe,
 ) -> AccountFilterMap {
     // Retrieve the price update v2 pdas from the indexed custodies
     let trade_oracle_keys: Vec<String> = indexed_custodies
@@ -142,6 +144,9 @@ async fn generate_accounts_filter_map(
     // Retrieve the existing limit order book keys - they are monitored for close events
     let existing_limit_order_books_keys: Vec<String> =
         indexed_limit_order_books.read().await.keys().map(|p| p.to_string()).collect();
+
+    // Retrieve the existing user profiles keys - they are monitored for close events
+    let existing_user_profiles_keys: Vec<String> = indexed_user_profiles.read().await.keys().map(|p| p.to_string()).collect();
 
     // Create the accounts filter map (on all positions based on discriminator, and the above price update v2 pdas)
     let mut accounts_filter_map: AccountFilterMap = HashMap::new();
@@ -175,8 +180,8 @@ async fn generate_accounts_filter_map(
                 owner: vec![],
                 filters: vec![],
                 nonempty_txn_signature: None,
-                },
-            );
+            },
+        );
     }
 
     let limit_order_book_owner = vec![adrena_abi::ID.to_string()];
@@ -207,8 +212,45 @@ async fn generate_accounts_filter_map(
                 owner: vec![],
                 filters: vec![],
                 nonempty_txn_signature: None,
-                },
-            );
+            },
+        );
+    }
+
+    let user_profiles_owner = vec![adrena_abi::ID.to_string()];
+
+    let user_profiles_filter_discriminator = SubscribeRequestFilterAccountsFilter {
+        filter: Some(AccountsFilterDataOneof::Memcmp(SubscribeRequestFilterAccountsFilterMemcmp {
+            offset: 0,
+            data: Some(AccountsFilterMemcmpOneof::Bytes(get_user_profile_anchor_discriminator())),
+        })),
+    };
+
+    // Add a filter for user profile account size
+    let user_profiles_filter_datasize = SubscribeRequestFilterAccountsFilter {
+        filter: Some(AccountsFilterDataOneof::Datasize(408)), // Get only user profile V2
+    };
+
+    accounts_filter_map.insert(
+        "user_profiles_create_update".to_owned(),
+        SubscribeRequestFilterAccounts {
+            account: vec![],
+            owner: user_profiles_owner,
+            filters: vec![user_profiles_filter_discriminator, user_profiles_filter_datasize],
+            nonempty_txn_signature: None,
+        },
+    );
+
+    if !existing_user_profiles_keys.is_empty() {
+        // Existing user profiles - We monitor these to catch when they are closed
+        accounts_filter_map.insert(
+            "user_profiles_close".to_owned(),
+            SubscribeRequestFilterAccounts {
+                account: existing_user_profiles_keys,
+                owner: vec![],
+                filters: vec![],
+                nonempty_txn_signature: None,
+            },
+        );
     }
 
     // Price update v2 pdas - the price updates
@@ -249,6 +291,7 @@ async fn main() -> anyhow::Result<()> {
     // The array of indexed custodies - These are not directly observed, but are needed for instructions and to keep track of which price update v2 accounts are observed
     let indexed_custodies: IndexedCustodiesThreadSafe = Arc::new(RwLock::new(HashMap::new()));
     let indexed_limit_order_books: IndexedLimitOrderBooksThreadSafe = Arc::new(RwLock::new(HashMap::new()));
+    let indexed_user_profiles: IndexedUserProfilesThreadSafe = Arc::new(RwLock::new(HashMap::new()));
 
     // The default exponential backoff strategy intervals:
     // [500ms, 750ms, 1.125s, 1.6875s, 2.53125s, 3.796875s, 5.6953125s,
@@ -259,6 +302,7 @@ async fn main() -> anyhow::Result<()> {
         let indexed_positions = Arc::clone(&indexed_positions);
         let indexed_custodies = Arc::clone(&indexed_custodies);
         let indexed_limit_order_books = Arc::clone(&indexed_limit_order_books);
+        let indexed_user_profiles = Arc::clone(&indexed_user_profiles);
         let mut periodical_priority_fees_fetching_task: Option<JoinHandle<Result<(), backoff::Error<anyhow::Error>>>> = None;
 
         async move {
@@ -283,12 +327,6 @@ async fn main() -> anyhow::Result<()> {
             let client = Client::new(Cluster::Custom(args.endpoint.clone(), args.endpoint.clone()), Arc::clone(&payer));
             let program = client.program(adrena_abi::ID).map_err(|e| backoff::Error::transient(e.into()))?;
             log::info!("  <> gRPC, RPC clients connected!");
-
-            // Fetched once
-            let cortex: Cortex = program
-                .account::<Cortex>(adrena_abi::CORTEX_ID)
-                .await
-                .map_err(|e| backoff::Error::transient(e.into()))?;
 
             // Fetched once
             let pool = program
@@ -330,6 +368,20 @@ async fn main() -> anyhow::Result<()> {
                 log::info!("  <> # of existing limit order books parsed and loaded: {}", indexed_limit_order_books.read().await.len());
             }
 
+            log::info!("3 - Retrieving and indexing existing user profiles...");
+            {
+                let user_profiles_pda_filter = RpcFilterType::Memcmp(Memcmp::new_base58_encoded(0, &get_user_profile_anchor_discriminator()));
+                let user_profiles_size_filter = RpcFilterType::DataSize(408); // 408-byte UserProfile V2 accounts
+                let filters = vec![user_profiles_pda_filter, user_profiles_size_filter];
+                let existing_user_profiles_accounts = program
+                    .accounts::<UserProfile>(filters)
+                    .await
+                    .map_err(|e| backoff::Error::transient(e.into()))?;
+                // Extend the indexed user profiles map with the existing user profiles
+                indexed_user_profiles.write().await.extend(existing_user_profiles_accounts);
+                log::info!("  <> # of existing user profiles parsed and loaded: {}", indexed_user_profiles.read().await.len());
+            }
+
             // Update the indexed custodies map based on the indexed positions
             update_indexed_custodies(&program, &indexed_positions, &indexed_limit_order_books, &indexed_custodies).await?;
             // ////////////////////////////////////////////////////////////////
@@ -339,7 +391,7 @@ async fn main() -> anyhow::Result<()> {
             // to inform the server about the accounts we are interested in observing changes to
             // ////////////////////////////////////////////////////////////////
             log::info!("3 - Generate subscription request and open stream...");
-            let accounts_filter_map = generate_accounts_filter_map(&indexed_custodies, &indexed_positions, &indexed_limit_order_books).await;
+            let accounts_filter_map = generate_accounts_filter_map(&indexed_custodies, &indexed_positions, &indexed_limit_order_books, &indexed_user_profiles).await;
             log::info!("  <> Account filter map initialized");
             let (mut subscribe_tx, mut stream) = {
                 let request = SubscribeRequest {
@@ -362,7 +414,7 @@ async fn main() -> anyhow::Result<()> {
             // ////////////////////////////////////////////////////////////////
             let priority_fees = Arc::new(RwLock::new(PriorityFees {
                 median: 0,
-                high: 0, 
+                high: 0,
                 ultra: 0,
             }));
             // Spawn a task to poll priority fees every 5 seconds
@@ -371,13 +423,13 @@ async fn main() -> anyhow::Result<()> {
             {
             periodical_priority_fees_fetching_task = Some({
                 let priority_fees = Arc::clone(&priority_fees);
-                
+
                 tokio::spawn(async move {
                     let mut fee_refresh_interval = interval(PRIORITY_FEE_REFRESH_INTERVAL);
                     loop {
                         fee_refresh_interval.tick().await;
                         let mut priority_fees_write = priority_fees.write().await;
-                        
+
                         if let Ok(fee) = fetch_mean_priority_fee(&client, MEDIAN_PRIORITY_FEE_PERCENTILE).await {
                             priority_fees_write.median = fee;
                         }
@@ -409,9 +461,9 @@ async fn main() -> anyhow::Result<()> {
                             &indexed_positions,
                             &indexed_custodies,
                             &indexed_limit_order_books,
+                            &indexed_user_profiles,
                             &payer,
                             &args.endpoint.clone(),
-                            &cortex,
                             &pool,
                             &mut subscribe_tx,
                             &priority_fees,

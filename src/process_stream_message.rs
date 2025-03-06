@@ -2,19 +2,23 @@ use {
     crate::{
         evaluate_and_run_automated_orders::evaluate_and_run_automated_orders,
         generate_accounts_filter_map,
-        update_indexes::{update_indexed_limit_order_books, update_indexed_positions},
-        IndexedCustodiesThreadSafe, IndexedLimitOrderBooksThreadSafe, IndexedPositionsThreadSafe, PriorityFeesThreadSafe,
+        update_indexes::{update_indexed_limit_order_books, update_indexed_positions, update_indexed_user_profiles},
+        IndexedCustodiesThreadSafe, IndexedLimitOrderBooksThreadSafe, IndexedPositionsThreadSafe, IndexedUserProfilesThreadSafe,
+        PriorityFeesThreadSafe,
     },
-    adrena_abi::{
-        types::{Cortex, Position},
-        LimitOrderBook, Pool,
-    },
+    adrena_abi::{types::Position, LimitOrderBook, Pool, UserProfile},
     anchor_client::{Client, Cluster},
     futures::{channel::mpsc::SendError, Sink, SinkExt},
     solana_sdk::{pubkey::Pubkey, signature::Keypair},
     std::sync::Arc,
     yellowstone_grpc_proto::geyser::{subscribe_update::UpdateOneof, SubscribeRequest, SubscribeRequestPing, SubscribeUpdate},
 };
+
+pub enum UserProfileUpdate {
+    Created(UserProfile),
+    Modified(UserProfile),
+    Closed,
+}
 
 pub enum LimitOrderBookUpdate {
     Created(LimitOrderBook),
@@ -33,9 +37,9 @@ pub async fn process_stream_message<S>(
     indexed_positions: &IndexedPositionsThreadSafe,
     indexed_custodies: &IndexedCustodiesThreadSafe,
     indexed_limit_order_books: &IndexedLimitOrderBooksThreadSafe,
+    indexed_user_profiles: &IndexedUserProfilesThreadSafe,
     payer: &Arc<Keypair>,
     endpoint: &str,
-    cortex: &Cortex,
     pool: &Pool,
     subscribe_tx: &mut S,
     priority_fees: &PriorityFeesThreadSafe,
@@ -65,9 +69,9 @@ where
                             indexed_positions,
                             indexed_custodies,
                             indexed_limit_order_books,
+                            indexed_user_profiles,
                             payer,
                             endpoint,
-                            cortex,
                             pool,
                             priority_fees,
                         )
@@ -173,6 +177,44 @@ where
                                 subscriptions_update_required = true;
                             }
                         }
+                    } else if msg.filters.contains(&"user_profiles_create_update".to_owned()) {
+                        // Updates the indexed user profiles map
+                        let update = update_indexed_user_profiles(&account_key, &account_data, indexed_user_profiles).await?;
+
+                        // Update the indexed custodies map and the subscriptions request if a new position was created
+                        match update {
+                            UserProfileUpdate::Created(_new_user_profile) => {
+                                log::info!("(lobcu) New user profile created: {:#?}", account_key);
+                            }
+                            UserProfileUpdate::Modified(_user_profile) => {
+                                log::info!("(lobcu) UserProfile modified: {:#?}", account_key);
+                            }
+                            UserProfileUpdate::Closed => {
+                                log::info!("(lobcu) UserProfile closed: {:#?}", account_key);
+
+                                // We need to update the subscriptions request to remove the closed user profile
+                                subscriptions_update_required = true;
+                            }
+                        }
+                    }
+                    /* Else if is important as we only want to end up here if the message is not about a  positions_create_update */
+                    else if msg.filters.contains(&"user_profiles_close".to_owned()) {
+                        // Updates the indexed positions map
+                        let update = update_indexed_user_profiles(&account_key, &account_data, indexed_user_profiles).await?;
+
+                        match update {
+                            UserProfileUpdate::Created(_) => {
+                                panic!("New user profile created in user_profiles_close filter");
+                            }
+                            UserProfileUpdate::Modified(_) => {
+                                panic!("User profile updated in user_profiles_close filter");
+                            }
+                            UserProfileUpdate::Closed => {
+                                log::info!("(up) User profile closed: {:#?}", account_key);
+                                // We need to update the subscriptions request to remove the user profile
+                                subscriptions_update_required = true;
+                            }
+                        }
                     }
                 }
                 Some(UpdateOneof::Ping(_)) => {
@@ -199,8 +241,13 @@ where
     // Update the subscriptions request if needed
     if subscriptions_update_required {
         log::info!("  <> Update subscriptions request");
-        let accounts_filter_map =
-            generate_accounts_filter_map(indexed_custodies, indexed_positions, indexed_limit_order_books).await;
+        let accounts_filter_map = generate_accounts_filter_map(
+            indexed_custodies,
+            indexed_positions,
+            indexed_limit_order_books,
+            indexed_user_profiles,
+        )
+        .await;
         let request = SubscribeRequest {
             ping: None, //Some(SubscribeRequestPing { id: 1 }),
             accounts: accounts_filter_map,

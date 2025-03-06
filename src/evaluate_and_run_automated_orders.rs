@@ -1,9 +1,10 @@
 use {
     crate::{
         handlers::{self},
-        IndexedCustodiesThreadSafe, IndexedLimitOrderBooksThreadSafe, IndexedPositionsThreadSafe, PriorityFeesThreadSafe,
+        IndexedCustodiesThreadSafe, IndexedLimitOrderBooksThreadSafe, IndexedPositionsThreadSafe, IndexedUserProfilesThreadSafe,
+        PriorityFeesThreadSafe,
     },
-    adrena_abi::{oracle_price::OraclePrice, pyth::PriceUpdateV2, types::Cortex, Pool, Side},
+    adrena_abi::{oracle_price::OraclePrice, pyth::PriceUpdateV2, Pool, Side},
     anchor_client::{Client, Cluster},
     solana_sdk::{pubkey::Pubkey, signature::Keypair},
     std::sync::Arc,
@@ -18,9 +19,9 @@ pub async fn evaluate_and_run_automated_orders(
     indexed_positions: &IndexedPositionsThreadSafe,
     indexed_custodies: &IndexedCustodiesThreadSafe,
     indexed_limit_order_books: &IndexedLimitOrderBooksThreadSafe,
+    indexed_user_profiles: &IndexedUserProfilesThreadSafe,
     payer: &Arc<Keypair>,
     endpoint: &str,
-    cortex: &Cortex,
     pool: &Pool,
     priority_fees: &PriorityFeesThreadSafe,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
@@ -62,14 +63,34 @@ pub async fn evaluate_and_run_automated_orders(
         let position_key = *position_key;
         let position = *position;
         let indexed_custodies = Arc::clone(indexed_custodies);
-        let cortex = *cortex;
         let pool = *pool;
         let priority_fees = Arc::clone(priority_fees);
+        let indexed_user_profiles = Arc::clone(indexed_user_profiles);
 
         let client = Client::new(Cluster::Custom(endpoint.to_string(), endpoint.to_string()), Arc::clone(payer));
         let program = client
             .program(adrena_abi::ID)
             .map_err(|e| backoff::Error::transient(e.into()))?;
+
+        // Only use user_profile when there is a referrer
+        let (user_profile, referrer_profile) = {
+            let indexed_user_profiles_read = indexed_user_profiles.read().await;
+            let user_profile_pda =
+                Pubkey::find_program_address(&[b"user_profile", &position.owner.to_bytes()], &adrena_abi::ID).0;
+
+            // Use user_profile only when there is a referrer
+            let user_profile = indexed_user_profiles_read.get(&user_profile_pda);
+
+            if let Some(u) = user_profile {
+                if u.referrer_profile.ne(&Pubkey::default()) {
+                    (Some(user_profile_pda), Some(u.referrer_profile))
+                } else {
+                    (None, None)
+                }
+            } else {
+                (None, None)
+            }
+        };
 
         let task = tokio::spawn(async move {
             let result: Result<(), anyhow::Error> = async {
@@ -83,8 +104,9 @@ pub async fn evaluate_and_run_automated_orders(
                                 &oracle_price,
                                 &indexed_custodies,
                                 &program,
-                                &cortex,
                                 &priority_fees,
+                                user_profile,
+                                referrer_profile,
                             )
                             .await
                             {
@@ -100,8 +122,9 @@ pub async fn evaluate_and_run_automated_orders(
                                 &oracle_price,
                                 &indexed_custodies,
                                 &program,
-                                &cortex,
                                 &priority_fees,
+                                user_profile,
+                                referrer_profile,
                             )
                             .await
                             {
@@ -116,9 +139,10 @@ pub async fn evaluate_and_run_automated_orders(
                             &oracle_price,
                             &indexed_custodies,
                             &program,
-                            &cortex,
                             &pool,
                             &priority_fees,
+                            user_profile,
+                            referrer_profile,
                         )
                         .await
                         {
@@ -134,8 +158,9 @@ pub async fn evaluate_and_run_automated_orders(
                                 &oracle_price,
                                 &indexed_custodies,
                                 &program,
-                                &cortex,
                                 &priority_fees,
+                                user_profile,
+                                referrer_profile,
                             )
                             .await
                             {
@@ -151,8 +176,9 @@ pub async fn evaluate_and_run_automated_orders(
                                 &oracle_price,
                                 &indexed_custodies,
                                 &program,
-                                &cortex,
                                 &priority_fees,
+                                user_profile,
+                                referrer_profile,
                             )
                             .await
                             {
@@ -167,9 +193,10 @@ pub async fn evaluate_and_run_automated_orders(
                             &oracle_price,
                             &indexed_custodies,
                             &program,
-                            &cortex,
                             &pool,
                             &priority_fees,
+                            user_profile,
+                            referrer_profile,
                         )
                         .await
                         {
