@@ -1,10 +1,6 @@
 use {
     crate::{process_stream_message::process_stream_message, update_indexes::update_indexed_custodies},
-    adrena_abi::{
-        main_pool::USDC_CUSTODY_ID,
-        types::{Cortex, Position},
-        LimitOrderBook, Pool,
-    },
+    adrena_abi::{main_pool::USDC_CUSTODY_ID, types::Cortex, LimitOrderBook, Pool},
     anchor_client::{solana_sdk::signer::keypair::read_keypair_file, Client, Cluster},
     clap::Parser,
     futures::StreamExt,
@@ -13,6 +9,7 @@ use {
     std::{
         collections::{BTreeMap, HashMap},
         env,
+        str::FromStr,
         sync::Arc,
         time::Duration,
     },
@@ -249,78 +246,21 @@ async fn main() -> anyhow::Result<()> {
     // Main loop
     loop {
         // ////////////////////////////////////////////////////////////////
-        // The account filter map is what is provided to the subscription request
-        // to inform the server about the accounts we are interested in observing changes to
+        //  In case it errored out, abort the sol price and priority fees tasks (will be recreated)
         // ////////////////////////////////////////////////////////////////
-        log::info!("1 - Generate the accounts filter map...");
-        let accounts_filter_map =
-            generate_accounts_filter_map(&indexed_custodies, &indexed_positions, &indexed_limit_order_books).await;
-        log::info!("  <> Account filter map initialized");
-
-        // ////////////////////////////////////////////////////////////////
-        // Creating the Fumarole request from the accounts filter map
-        // ////////////////////////////////////////////////////////////////
-        log::info!("2 - Create the SuscribeRequest from the accounts filter map...");
-
-        let request = proto::SubscribeRequest {
-            consumer_group_label: args.consumer_group.clone(),
-            consumer_id: Some(args.member_id),
-            accounts: accounts_filter_map,
-            transactions: HashMap::new(),
-        };
-
-        // ////////////////////////////////////////////////////////////////
-        //  Open the connection to Fumarole
-        // ////////////////////////////////////////////////////////////////
-        log::info!("3 - Connect to Fumarole...");
-        let config = FumaroleConfig {
-            endpoint: args.fumarole_endpoint.clone(),
-            x_token: args.fumarole_x_token.clone(),
-            max_decoding_message_size_bytes: 512_000_000,
-            x_metadata: BTreeMap::new(),
-        };
-        let mut fumarole = match FumaroleClientBuilder::default().connect(config).await {
-            Ok(client) => client,
-            Err(e) => {
-                log::error!("Failed to connect to Fumarole: {:?}", e);
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                continue;
-            }
-        };
-
-        // ////////////////////////////////////////////////////////////////
-        // Subscribe to the stream
-        // ////////////////////////////////////////////////////////////////
-        log::info!("4 - Subscribe to Fumarole request...");
-        let response = match fumarole.subscribe_with_request(request).await {
-            Ok(response) => response,
-            Err(e) => {
-                log::error!("Failed to subscribe to Fumarole: {:?}", e);
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                continue;
-            }
-        };
-
-        // ////////////////////////////////////////////////////////////////
-        //  Process the stream
-        // ////////////////////////////////////////////////////////////////
-        log::info!("5 - Process Fumarole stream...");
-        let mut rx = response.into_inner();
-
-        // In case it errored out, abort the fee task (will be recreated)
         if let Some(t) = periodical_priority_fees_fetching_task.take() {
             t.abort();
         }
 
-        // Also abort the SOL price task if it exists
         if let Some(t) = sol_price_update_task.take() {
             t.abort();
         }
+        // ////////////////////////////////////////////////////////////////
 
         // ////////////////////////////////////////////////////////////////
         //  Connect to the RPC and fetch the program accounts
         // ////////////////////////////////////////////////////////////////
-        log::info!("6 - Connect to the RPC and fetch the program accounts...");
+        log::info!("1 - Connect to the RPC and fetch the program accounts...");
         let payer = read_keypair_file(args.payer_keypair.clone()).unwrap();
         let payer = Arc::new(payer);
         let client = Client::new(
@@ -331,7 +271,7 @@ async fn main() -> anyhow::Result<()> {
             .program(adrena_abi::ID)
             .map_err(|e| anyhow::anyhow!("Failed to create program client: {}", e))?;
 
-        log::info!("  <> Fumarole, RPC clients connected!");
+        log::info!("  <> RPC clients connected!");
 
         // Fetched once
         let cortex: Cortex = program
@@ -351,30 +291,12 @@ async fn main() -> anyhow::Result<()> {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to fetch USDC custody: {e}"))?;
         indexed_custodies.write().await.insert(USDC_CUSTODY_ID, usdc_custody);
-
         // ////////////////////////////////////////////////////////////////
-        //  Retrieving and indexing existing positions and their custodies
-        // ////////////////////////////////////////////////////////////////
-        log::info!("7 - Retrieve and index existing positions and their custodies...");
-        {
-            let position_pda_filter = RpcFilterType::Memcmp(Memcmp::new_base58_encoded(0, &get_position_anchor_discriminator()));
-            let filters = vec![position_pda_filter];
-            let existing_positions_accounts = program
-                .accounts::<Position>(filters)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to fetch existing positions: {e}"))?;
-            // Extend the indexed positions map with the existing positions
-            indexed_positions.write().await.extend(existing_positions_accounts);
-            log::info!(
-                "  <> # of existing positions parsed and loaded: {}",
-                indexed_positions.read().await.len()
-            );
-        }
 
         // ////////////////////////////////////////////////////////////////
         //  Retrieving and indexing existing limit order books
         // ////////////////////////////////////////////////////////////////
-        log::info!("8 - Retrieve and index existing limit order books...");
+        log::info!("2 - Retrieve and index existing limit order books...");
         {
             let limit_order_book_pda_filter =
                 RpcFilterType::Memcmp(Memcmp::new_base58_encoded(0, &get_limit_order_book_anchor_discriminator()));
@@ -393,11 +315,12 @@ async fn main() -> anyhow::Result<()> {
                 indexed_limit_order_books.read().await.len()
             );
         }
+        // ////////////////////////////////////////////////////////////////
 
         // ////////////////////////////////////////////////////////////////
         //  Update the indexed custodies map based on the indexed positions
         // ////////////////////////////////////////////////////////////////
-        log::info!("9 - Update the indexed custodies map based on the indexed positions...");
+        log::info!("3 - Update the indexed custodies map based on the indexed positions...");
         if let Err(e) =
             update_indexed_custodies(&program, &indexed_positions, &indexed_limit_order_books, &indexed_custodies).await
         {
@@ -410,7 +333,7 @@ async fn main() -> anyhow::Result<()> {
         // ////////////////////////////////////////////////////////////////
         // Side thread to fetch the median priority fee every 5 seconds
         // ////////////////////////////////////////////////////////////////
-        log::info!("10 - Spawn a task to poll priority fees every 5 seconds...");
+        log::info!("4 - Spawn a task to poll priority fees every 5 seconds...");
         periodical_priority_fees_fetching_task = Some(priority_fees::start_priority_fees_updates(
             args.endpoint.clone(),
             Arc::clone(&priority_fees),
@@ -420,11 +343,72 @@ async fn main() -> anyhow::Result<()> {
         // Start a task that fetches SOL price every 20 seconds
         // This is used for calculating liquidation fees in USD terms
         // ////////////////////////////////////////////////////////////////
-        log::info!("11 - Spawn a task to poll SOL price every 20 seconds...");
+        log::info!("5 - Spawn a task to poll SOL price every 20 seconds...");
+
         sol_price_update_task = Some(sol_price::start_sol_price_update_task(
             args.endpoint.clone(),
             Arc::clone(&sol_price),
+            Pubkey::from_str("7UVimffxr9ow1uXYxsr4LHAcV58mLzhmwaeKvJ1pjLiE").unwrap(),
         ));
+
+        // ////////////////////////////////////////////////////////////////
+        // The account filter map is what is provided to the subscription request
+        // to inform the server about the accounts we are interested in observing changes to
+        // ////////////////////////////////////////////////////////////////
+        log::info!("6 - Generate the accounts filter map...");
+        let accounts_filter_map =
+            generate_accounts_filter_map(&indexed_custodies, &indexed_positions, &indexed_limit_order_books).await;
+        log::info!("  <> Account filter map initialized");
+
+        // ////////////////////////////////////////////////////////////////
+        // Creating the Fumarole request from the accounts filter map
+        // ////////////////////////////////////////////////////////////////
+        log::info!("7 - Create the SuscribeRequest from the accounts filter map...");
+
+        let request = proto::SubscribeRequest {
+            consumer_group_label: args.consumer_group.clone(),
+            consumer_id: Some(args.member_id),
+            accounts: accounts_filter_map,
+            transactions: HashMap::new(),
+        };
+
+        // ////////////////////////////////////////////////////////////////
+        //  Open the connection to Fumarole
+        // ////////////////////////////////////////////////////////////////
+        log::info!("8 - Connect to Fumarole...");
+        let config = FumaroleConfig {
+            endpoint: args.fumarole_endpoint.clone(),
+            x_token: args.fumarole_x_token.clone(),
+            max_decoding_message_size_bytes: 512_000_000,
+            x_metadata: BTreeMap::new(),
+        };
+        let mut fumarole = match FumaroleClientBuilder::default().connect(config).await {
+            Ok(client) => client,
+            Err(e) => {
+                log::error!("Failed to connect to Fumarole: {:?}", e);
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                continue;
+            }
+        };
+
+        // ////////////////////////////////////////////////////////////////
+        // Subscribe to the stream
+        // ////////////////////////////////////////////////////////////////
+        log::info!("9 - Subscribe to Fumarole request...");
+        let response = match fumarole.subscribe_with_request(request).await {
+            Ok(response) => response,
+            Err(e) => {
+                log::error!("Failed to subscribe to Fumarole: {:?}", e);
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                continue;
+            }
+        };
+
+        // ////////////////////////////////////////////////////////////////
+        //  Process the stream
+        // ////////////////////////////////////////////////////////////////
+        log::info!("10 - Process Fumarole stream...");
+        let mut rx = response.into_inner();
 
         // ////////////////////////////////////////////////////////////////
         // CORE LOOP
@@ -434,7 +418,7 @@ async fn main() -> anyhow::Result<()> {
         // liquidation/sl/tp conditions on the already indexed positions if
         // coming from the position accounts, we update the indexed positions map
         // ////////////////////////////////////////////////////////////////
-        log::info!("12 - Start core loop: process Fumarole stream...");
+        log::info!("11 - Start core loop: process Fumarole stream...");
         while let Ok(Some(message)) = timeout(Duration::from_secs(11), rx.next()).await {
             if let Err(e) = process_stream_message(
                 message.map_err(|e| backoff::Error::transient(anyhow::anyhow!("Stream error: {}", e))),

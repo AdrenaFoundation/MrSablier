@@ -1,6 +1,6 @@
 [package]
 name = "MrSablier"
-version = "0.1.9"
+version = "0.1.10"
 edition = "2021"
 authors = ["adrena.corto@gmail.com"]
 homepage = "https://github.com/AdrenaFoundation/MrSablier"
@@ -27,6 +27,7 @@ hex = "0.4.3"
 log = "0.4.17"
 maplit = "1.0.2"
 serde_json = "1.0.86"
+solana-program = "2.0.18"
 solana-sdk = "2.0.18"
 solana-transaction-status = "2.0.18"
 solana-client = "2.0.18"
