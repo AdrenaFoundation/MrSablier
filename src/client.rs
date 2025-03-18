@@ -1,11 +1,15 @@
 use {
-    crate::{process_stream_message::process_stream_message, update_indexes::update_indexed_custodies},
+    crate::{
+        process_stream_message::process_stream_message,
+        program_wrapper::ProgramWrapper,
+        update_indexes::{update_indexed_custodies, update_indexed_limit_order_books, update_indexed_positions},
+    },
     adrena_abi::{main_pool::USDC_CUSTODY_ID, types::Cortex, LimitOrderBook, Pool},
-    anchor_client::{solana_sdk::signer::keypair::read_keypair_file, Client, Cluster},
+    anchor_client::{Client, Cluster},
     clap::Parser,
     futures::StreamExt,
     solana_client::rpc_filter::{Memcmp, RpcFilterType},
-    solana_sdk::pubkey::Pubkey,
+    solana_sdk::{pubkey::Pubkey, signature::read_keypair_file},
     std::{
         collections::{BTreeMap, HashMap},
         env,
@@ -24,7 +28,6 @@ use {
     },
 };
 
-// Thread-safe types
 type AccountFilterMap = HashMap<String, SubscribeRequestFilterAccounts>;
 type IndexedPositionsThreadSafe = Arc<RwLock<HashMap<Pubkey, adrena_abi::types::Position>>>;
 type IndexedCustodiesThreadSafe = Arc<RwLock<HashMap<Pubkey, adrena_abi::types::Custody>>>;
@@ -40,6 +43,7 @@ pub mod evaluate_and_run_automated_orders;
 pub mod handlers;
 pub mod priority_fees;
 pub mod process_stream_message;
+pub mod program_wrapper;
 pub mod sol_price;
 pub mod update_indexes;
 pub mod utils;
@@ -137,6 +141,8 @@ async fn generate_accounts_filter_map(
 
     let position_owner = vec![adrena_abi::ID.to_string()];
 
+    println!("position_filter_discriminator: {:?}", position_filter_discriminator);
+
     accounts_filter_map.insert(
         "positions_create_update".to_owned(),
         SubscribeRequestFilterAccounts {
@@ -147,13 +153,24 @@ async fn generate_accounts_filter_map(
         },
     );
 
+    // Make sure we're only getting specific accounts
+    log::info!("Setting up account filters for specific accounts only...");
+    log::info!(
+        "Number of position accounts being monitored: {}",
+        existing_positions_keys.len()
+    );
+    log::info!(
+        "Number of limit order book accounts being monitored: {}",
+        existing_limit_order_books_keys.len()
+    );
+
     if !existing_positions_keys.is_empty() {
         // Existing positions - We monitor these to catch when they are closed
         accounts_filter_map.insert(
             "positions_close".to_owned(),
             SubscribeRequestFilterAccounts {
                 account: existing_positions_keys,
-                owner: vec![],
+                owner: vec![adrena_abi::ID.to_string()],
                 filters: vec![],
                 nonempty_txn_signature: None,
             },
@@ -169,7 +186,7 @@ async fn generate_accounts_filter_map(
         })),
     };
 
-    accounts_filter_map.insert(
+    /*   accounts_filter_map.insert(
         "limit_order_books_create_update".to_owned(),
         SubscribeRequestFilterAccounts {
             account: vec![],
@@ -177,24 +194,24 @@ async fn generate_accounts_filter_map(
             filters: vec![limit_order_book_filter_discriminator],
             nonempty_txn_signature: None,
         },
-    );
+    ); */
 
-    if !existing_limit_order_books_keys.is_empty() {
+    /*  if !existing_limit_order_books_keys.is_empty() {
         // Existing limit order books - We monitor these to catch when they are closed
         accounts_filter_map.insert(
             "limit_order_books_close".to_owned(),
             SubscribeRequestFilterAccounts {
                 account: existing_limit_order_books_keys,
-                owner: vec![],
+                owner: vec![adrena_abi::ID.to_string()],
                 filters: vec![],
                 nonempty_txn_signature: None,
             },
         );
-    }
+    } */
 
     // Price update v2 pdas - the price updates
     let price_feed_owner = vec![PYTH_RECEIVER_PROGRAM.to_owned()];
-    accounts_filter_map.insert(
+    /* accounts_filter_map.insert(
         "price_feeds".to_owned(),
         SubscribeRequestFilterAccounts {
             account: trade_oracle_keys,
@@ -202,7 +219,7 @@ async fn generate_accounts_filter_map(
             filters: vec![],
             nonempty_txn_signature: None,
         },
-    );
+    ); */
 
     accounts_filter_map
 }
@@ -270,6 +287,12 @@ async fn main() -> anyhow::Result<()> {
         let program = client
             .program(adrena_abi::ID)
             .map_err(|e| anyhow::anyhow!("Failed to create program client: {}", e))?;
+
+        // Wrap the program in an Arc for thread safety
+        let program = Arc::new(program);
+
+        // Create a program wrapper
+        let program_wrapper = ProgramWrapper::new(&args.endpoint, Arc::clone(&payer), &adrena_abi::ID.to_string())?;
 
         log::info!("  <> RPC clients connected!");
 
@@ -358,6 +381,20 @@ async fn main() -> anyhow::Result<()> {
         log::info!("6 - Generate the accounts filter map...");
         let accounts_filter_map =
             generate_accounts_filter_map(&indexed_custodies, &indexed_positions, &indexed_limit_order_books).await;
+
+        let mut transaction_filter_map = HashMap::new();
+        transaction_filter_map.insert(
+            "program_transactions".to_owned(),
+            SubscribeRequestFilterTransactions {
+                vote: None,
+                failed: None,
+                signature: None,
+                account_include: vec![adrena_abi::ID.to_string()],
+                account_exclude: vec![],
+                account_required: vec![],
+            },
+        );
+
         log::info!("  <> Account filter map initialized");
 
         // ////////////////////////////////////////////////////////////////
@@ -365,10 +402,12 @@ async fn main() -> anyhow::Result<()> {
         // ////////////////////////////////////////////////////////////////
         log::info!("7 - Create the SuscribeRequest from the accounts filter map...");
 
+        // Create the request with the Fumarole client format
         let request = proto::SubscribeRequest {
             consumer_group_label: args.consumer_group.clone(),
             consumer_id: Some(args.member_id),
             accounts: accounts_filter_map,
+            //transactions: transaction_filter_map,
             transactions: HashMap::new(),
         };
 
@@ -419,23 +458,38 @@ async fn main() -> anyhow::Result<()> {
         // coming from the position accounts, we update the indexed positions map
         // ////////////////////////////////////////////////////////////////
         log::info!("11 - Start core loop: process Fumarole stream...");
-        while let Ok(Some(message)) = timeout(Duration::from_secs(11), rx.next()).await {
-            if let Err(e) = process_stream_message(
-                message.map_err(|e| backoff::Error::transient(anyhow::anyhow!("Stream error: {}", e))),
-                &indexed_positions,
-                &indexed_custodies,
-                &indexed_limit_order_books,
-                &payer,
-                &args.endpoint,
-                &cortex,
-                &pool,
-                &priority_fees,
-                &sol_price,
-            )
-            .await
-            {
-                log::error!("Error processing message: {:?}", e);
-                break;
+        loop {
+            match timeout(Duration::from_secs(11), rx.next()).await {
+                Ok(Some(message)) => {
+                    println!("message from fumarole: {:?}", message);
+
+                    if let Err(e) = process_stream_message(
+                        message.map_err(|e| backoff::Error::transient(anyhow::anyhow!("Stream error: {}", e))),
+                        &indexed_positions,
+                        &indexed_custodies,
+                        &indexed_limit_order_books,
+                        &program_wrapper,
+                        &cortex,
+                        &pool,
+                        &priority_fees,
+                        &sol_price,
+                    )
+                    .await
+                    {
+                        log::error!("Error processing message: {:?}", e);
+                        break;
+                    }
+                }
+                Ok(None) => {
+                    // Stream ended normally
+                    log::info!("Stream ended, reconnecting...");
+                    break;
+                }
+                Err(_) => {
+                    // Timeout occurred, just continue
+                    log::debug!("No message received in the last 11 seconds, continuing...");
+                    continue;
+                }
             }
         }
 

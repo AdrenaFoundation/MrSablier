@@ -1,6 +1,7 @@
 use {
     crate::{
         evaluate_and_run_automated_orders::evaluate_and_run_automated_orders,
+        program_wrapper::ProgramWrapper,
         update_indexes::{update_indexed_limit_order_books, update_indexed_positions},
         IndexedCustodiesThreadSafe, IndexedLimitOrderBooksThreadSafe, IndexedPositionsThreadSafe, PriorityFeesThreadSafe,
         SolPriceThreadSafe,
@@ -9,9 +10,7 @@ use {
         types::{Cortex, Position},
         LimitOrderBook, Pool,
     },
-    anchor_client::{Client, Cluster},
-    solana_sdk::{pubkey::Pubkey, signature::Keypair},
-    std::sync::Arc,
+    solana_sdk::pubkey::Pubkey,
     yellowstone_grpc_proto::geyser::{subscribe_update::UpdateOneof, SubscribeUpdate},
 };
 
@@ -32,17 +31,12 @@ pub async fn process_stream_message(
     indexed_positions: &IndexedPositionsThreadSafe,
     indexed_custodies: &IndexedCustodiesThreadSafe,
     indexed_limit_order_books: &IndexedLimitOrderBooksThreadSafe,
-    payer: &Arc<Keypair>,
-    endpoint: &str,
+    program: &ProgramWrapper,
     cortex: &Cortex,
     pool: &Pool,
     priority_fees: &PriorityFeesThreadSafe,
     sol_price: &SolPriceThreadSafe,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
-    let program = Client::new(Cluster::Custom(endpoint.to_string(), endpoint.to_string()), Arc::clone(payer))
-        .program(adrena_abi::ID)
-        .map_err(|e| backoff::Error::transient(e.into()))?;
-
     match message {
         Ok(msg) => match msg.update_oneof {
             Some(UpdateOneof::Account(sua)) => {
@@ -57,8 +51,7 @@ pub async fn process_stream_message(
                         indexed_positions,
                         indexed_custodies,
                         indexed_limit_order_books,
-                        payer,
-                        endpoint,
+                        program,
                         cortex,
                         pool,
                         priority_fees,
@@ -74,6 +67,7 @@ pub async fn process_stream_message(
                             log::info!("(pcu) New position created: {:#?}", account_key);
                             if !indexed_custodies.read().await.contains_key(&new_position.custody) {
                                 let custody = program
+                                    .get_program()
                                     .account::<adrena_abi::types::Custody>(new_position.custody)
                                     .await
                                     .map_err(|e| backoff::Error::transient(e.into()))?;
@@ -144,6 +138,10 @@ pub async fn process_stream_message(
                         }
                     }
                 }
+            }
+            Some(UpdateOneof::Transaction(_)) => {
+                log::debug!("Skipping transaction message");
+                return Ok(());
             }
             Some(UpdateOneof::Ping(_)) => {
                 log::debug!("  <> Received ping message");

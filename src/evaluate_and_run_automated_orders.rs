@@ -1,13 +1,15 @@
 use {
     crate::{
-        handlers::{self},
-        IndexedCustodiesThreadSafe, IndexedLimitOrderBooksThreadSafe, IndexedPositionsThreadSafe, PriorityFeesThreadSafe,
+        handlers, program_wrapper::ProgramWrapper, IndexedCustodiesThreadSafe, IndexedLimitOrderBooksThreadSafe,
+        IndexedPositionsThreadSafe, PriorityFeesThreadSafe,
     },
-    adrena_abi::{oracle_price::OraclePrice, pyth::PriceUpdateV2, types::Cortex, Pool, Side},
-    anchor_client::{Client, Cluster},
-    anyhow::Result,
-    log,
-    solana_sdk::{pubkey::Pubkey, signature::Keypair},
+    adrena_abi::{
+        oracle_price::OraclePrice,
+        pyth::PriceUpdateV2,
+        types::{Cortex, Side},
+        Pool,
+    },
+    solana_sdk::pubkey::Pubkey,
     std::sync::Arc,
     tokio::sync::RwLock,
 };
@@ -21,8 +23,7 @@ pub async fn evaluate_and_run_automated_orders(
     indexed_positions: &IndexedPositionsThreadSafe,
     indexed_custodies: &IndexedCustodiesThreadSafe,
     indexed_limit_order_books: &IndexedLimitOrderBooksThreadSafe,
-    payer: &Arc<Keypair>,
-    endpoint: &str,
+    program: &ProgramWrapper,
     cortex: &Cortex,
     pool: &Pool,
     priority_fees: &PriorityFeesThreadSafe,
@@ -57,6 +58,9 @@ pub async fn evaluate_and_run_automated_orders(
 
     // make a clone of the indexed positions map to iterate over (while we modify the original map)
     let positions_shallow_clone = indexed_positions.read().await.clone();
+
+    // Create a clone of the program wrapper for use in spawned tasks
+    let program_for_tasks = program.clone();
     let mut tasks = vec![];
 
     for (position_key, position) in positions_shallow_clone
@@ -70,57 +74,19 @@ pub async fn evaluate_and_run_automated_orders(
         let pool = *pool;
         let priority_fees = Arc::clone(priority_fees);
         let sol_price = Arc::clone(sol_price);
-
-        let client = Client::new(Cluster::Custom(endpoint.to_string(), endpoint.to_string()), Arc::clone(payer));
-        let program = client
-            .program(adrena_abi::ID)
-            .map_err(|e| backoff::Error::transient(e.into()))?;
+        let program = program_for_tasks.clone();
 
         let task = tokio::spawn(async move {
             let result: Result<(), anyhow::Error> = async {
                 match position.get_side() {
                     Side::Long => {
-                        // Check SL
-                        /* if position.stop_loss_is_set() {
-                            if let Err(e) = handlers::sl_long::sl_long(
-                                &position_key,
-                                &position,
-                                &oracle_price,
-                                &indexed_custodies,
-                                &program,
-                                &cortex,
-                                &priority_fees,
-                            )
-                            .await
-                            {
-                                log::error!("Error in sl_long: {}", e);
-                            }
-                        } */
-
-                        // Check TP
-                        /* if position.take_profit_is_set() && position.take_profit_limit_price != 0 {
-                            if let Err(e) = handlers::tp_long::tp_long(
-                                &position_key,
-                                &position,
-                                &oracle_price,
-                                &indexed_custodies,
-                                &program,
-                                &cortex,
-                                &priority_fees,
-                            )
-                            .await
-                            {
-                                log::error!("Error in tp_long: {}", e);
-                            }
-                        } */
-
                         // Check LIQ
                         if let Err(e) = handlers::liquidate_long::liquidate_long(
                             &position_key,
                             &position,
                             &oracle_price,
                             &indexed_custodies,
-                            &program,
+                            program.get_program(),
                             &cortex,
                             &pool,
                             &priority_fees,
@@ -132,47 +98,13 @@ pub async fn evaluate_and_run_automated_orders(
                         }
                     }
                     Side::Short => {
-                        // Check SL
-                        /*  if position.stop_loss_is_set() {
-                            if let Err(e) = handlers::sl_short::sl_short(
-                                &position_key,
-                                &position,
-                                &oracle_price,
-                                &indexed_custodies,
-                                &program,
-                                &cortex,
-                                &priority_fees,
-                            )
-                            .await
-                            {
-                                log::error!("Error in sl_short: {}", e);
-                            }
-                        } */
-
-                        // Check TP
-                        /* if position.take_profit_is_set() && position.take_profit_limit_price != 0 {
-                            if let Err(e) = handlers::tp_short::tp_short(
-                                &position_key,
-                                &position,
-                                &oracle_price,
-                                &indexed_custodies,
-                                &program,
-                                &cortex,
-                                &priority_fees,
-                            )
-                            .await
-                            {
-                                log::error!("Error in tp_short: {}", e);
-                            }
-                        } */
-
-                        // Check LIQ
+                        // Check LIQ - uncomment when ready
                         /* if let Err(e) = handlers::liquidate_short::liquidate_short(
                             &position_key,
                             &position,
                             &oracle_price,
                             &indexed_custodies,
-                            &program,
+                            program.get_program(),
                             &cortex,
                             &pool,
                             &priority_fees,
@@ -195,89 +127,13 @@ pub async fn evaluate_and_run_automated_orders(
 
         tasks.push(task);
     }
-    /*
-       // make a clone of the indexed positions map to iterate over (while we modify the original map)
-       let limit_order_books_shallow_clone = indexed_limit_order_books.read().await.clone();
-       let mut tasks = vec![];
 
-       // let limit_order_book_custody_keys: HashSet<Pubkey> = indexed_limit_order_books
-       // .read()
-       // .await
-       // .values()
-       // .flat_map(|l| l.limit_orders.to_vec().into_iter().map(|l| l.custody))
-       // .collect();
-
-       for (limit_order_book_key, limit_order_book) in limit_order_books_shallow_clone.iter() {
-           for limit_order in limit_order_book.limit_orders {
-               if limit_order.custody == Pubkey::default() || limit_order.custody != associated_custody_key {
-                   continue;
-               }
-
-               let limit_order_book_key = *limit_order_book_key;
-               let limit_order_book = *limit_order_book;
-               let indexed_custodies = Arc::clone(indexed_custodies);
-               let priority_fees = Arc::clone(priority_fees);
-
-               let client = Client::new(Cluster::Custom(endpoint.to_string(), endpoint.to_string()), Arc::clone(payer));
-               let program = client
-                   .program(adrena_abi::ID)
-                   .map_err(|e| backoff::Error::transient(e.into()))?;
-
-               let task = tokio::spawn(async move {
-                   let result: Result<(), anyhow::Error> = async {
-                       match limit_order.get_side() {
-                           Side::Long => {
-                               if limit_order.is_executable(&oracle_price, &associated_custody_key) {
-                                   if let Err(e) = handlers::execute_limit_order_long::execute_limit_order_long(
-                                       &limit_order_book_key,
-                                       &limit_order_book,
-                                       &limit_order,
-                                       &indexed_custodies,
-                                       &program,
-                                       &priority_fees,
-                                   )
-                                   .await
-                                   {
-                                       log::error!("Error in execute_limit_order_long: {}", e);
-                                   }
-                               }
-                           }
-                           Side::Short => {
-                               if limit_order.is_executable(&oracle_price, &associated_custody_key) {
-                                   if let Err(e) = handlers::execute_limit_order_short::execute_limit_order_short(
-                                       &limit_order_book_key,
-                                       &limit_order_book,
-                                       &limit_order,
-                                       &indexed_custodies,
-                                       &program,
-                                       &priority_fees,
-                                   )
-                                   .await
-                                   {
-                                       log::error!("Error in execute_limit_order_short: {}", e);
-                                   }
-                               }
-                           }
-                           _ => {}
-                       }
-                       Ok::<(), anyhow::Error>(())
-                   }
-                   .await;
-
-                   if let Err(e) = result {
-                       log::error!("Error processing position {}: {:?}", limit_order_book_key, e);
-                   }
-               });
-
-               tasks.push(task);
-           }
-       }
-    */
     // Wait for all tasks to complete
     for task in tasks {
         if let Err(e) = task.await {
             log::error!("Task failed: {:?}", e);
         }
     }
+
     Ok(())
 }
