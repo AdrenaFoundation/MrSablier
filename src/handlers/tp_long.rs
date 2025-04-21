@@ -3,7 +3,7 @@ use {
         handlers::{create_close_position_long_ix, liquidate_long::calculate_size_risk_adjusted_position_fees},
         IndexedCustodiesThreadSafe, PriorityFeesThreadSafe, CLOSE_POSITION_LONG_CU_LIMIT,
     },
-    adrena_abi::{oracle_price::OraclePrice, Position, SPL_ASSOCIATED_TOKEN_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID},
+    adrena_abi::{oracle::OraclePrice, Position, SPL_ASSOCIATED_TOKEN_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID},
     anchor_client::Program,
     solana_client::rpc_config::RpcSendTransactionConfig,
     solana_sdk::{compute_budget::ComputeBudgetInstruction, pubkey::Pubkey, signature::Keypair},
@@ -34,6 +34,7 @@ pub async fn tp_long(
     let indexed_custodies_read = indexed_custodies.read().await;
     let custody = indexed_custodies_read.get(&position.custody).unwrap();
     let collateral_custody = indexed_custodies_read.get(&position.collateral_custody).unwrap();
+    let oracle_pda = adrena_abi::pda::get_oracle_pda().0;
 
     let collateral_mint = collateral_custody.mint;
 
@@ -58,6 +59,8 @@ pub async fn tp_long(
         user_profile,
         referrer_profile,
         custody,
+        &oracle_pda,
+        None,
         position.take_profit_limit_price,
     );
 

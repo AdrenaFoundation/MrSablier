@@ -23,6 +23,7 @@ pub async fn execute_limit_order_short(
     let collateral_custody = indexed_custodies_read.get(&limit_order.collateral_custody).unwrap();
 
     let pool_pda = adrena_abi::pda::get_pool_pda(&String::from("main-pool")).0;
+    let oracle_pda = adrena_abi::pda::get_oracle_pda().0;
 
     let limit_order_book_pda = adrena_abi::pda::get_limit_order_book_pda(&pool_pda, &limit_order_book.owner).0;
     let collateral_escrow_pda =
@@ -56,7 +57,8 @@ pub async fn execute_limit_order_short(
         &limit_order.custody,
         &limit_order.collateral_custody,
         custody,
-        collateral_custody,
+        &oracle_pda,
+        None,
         limit_order.id,
     );
 

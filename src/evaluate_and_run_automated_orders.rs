@@ -4,7 +4,7 @@ use {
         IndexedCustodiesThreadSafe, IndexedLimitOrderBooksThreadSafe, IndexedPositionsThreadSafe, IndexedUserProfilesThreadSafe,
         PriorityFeesThreadSafe,
     },
-    adrena_abi::{oracle_price::OraclePrice, pyth::PriceUpdateV2, Pool, Side},
+    adrena_abi::{oracle::OraclePrice, pyth::PriceUpdateV2, Pool, Side},
     anchor_client::{Client, Cluster},
     solana_sdk::{pubkey::Pubkey, signature::Keypair},
     std::sync::Arc,

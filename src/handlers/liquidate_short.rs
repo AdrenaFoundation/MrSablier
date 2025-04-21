@@ -4,7 +4,7 @@ use {
         IndexedCustodiesThreadSafe, PriorityFeesThreadSafe, LIQUIDATE_SHORT_CU_LIMIT,
     },
     adrena_abi::{
-        oracle_price::OraclePrice, LeverageCheckStatus, Pool, Position, SPL_ASSOCIATED_TOKEN_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID,
+        oracle::OraclePrice, LeverageCheckStatus, Pool, Position, SPL_ASSOCIATED_TOKEN_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID,
     },
     anchor_client::Program,
     solana_client::rpc_config::RpcSendTransactionConfig,
@@ -29,6 +29,7 @@ pub async fn liquidate_short(
     let indexed_custodies_read = indexed_custodies.read().await;
     let custody = indexed_custodies_read.get(&position.custody).unwrap();
     let collateral_custody = indexed_custodies_read.get(&position.collateral_custody).unwrap();
+    let oracle_pda = adrena_abi::pda::get_oracle_pda().0;
 
     // here we use the USDC price of 1 for simplicity
     let mock_collateral_token_price = OraclePrice::new(1_000_000, -6, 0);
@@ -64,7 +65,6 @@ pub async fn liquidate_short(
     };
 
     let indexed_custodies_read = indexed_custodies.read().await;
-    let custody = indexed_custodies_read.get(&position.custody).unwrap();
     let collateral_custody = indexed_custodies_read.get(&position.collateral_custody).unwrap();
 
     let collateral_mint = collateral_custody.mint;
@@ -87,10 +87,11 @@ pub async fn liquidate_short(
         position,
         receiving_account,
         transfer_authority_pda,
-        custody,
         user_profile,
         referrer_profile,
-        collateral_custody,
+        &collateral_custody,
+        &oracle_pda,
+        None,
     );
 
     let (_, priority_fee) = calculate_fee_risk_adjusted_position_fees(&position, &indexed_custodies, &priority_fees).await?;
