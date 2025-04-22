@@ -32,7 +32,6 @@ pub async fn tp_short(
     }
 
     let indexed_custodies_read = indexed_custodies.read().await;
-    let custody = indexed_custodies_read.get(&position.custody).unwrap();
     let collateral_custody = indexed_custodies_read.get(&position.collateral_custody).unwrap();
     let oracle_pda = adrena_abi::pda::get_oracle_pda().0;
 

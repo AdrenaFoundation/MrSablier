@@ -17,6 +17,7 @@
         "proto",
         "pubkeys",
         "pyth",
+        "reqwest",
         "sablier",
         "serde",
         "thiserror",

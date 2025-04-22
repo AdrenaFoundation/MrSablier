@@ -1,12 +1,10 @@
 use {
     crate::{
-        evaluate_and_run_automated_orders::evaluate_and_run_automated_orders,
         generate_accounts_filter_map,
         update_indexes::{update_indexed_limit_order_books, update_indexed_positions, update_indexed_user_profiles},
         IndexedCustodiesThreadSafe, IndexedLimitOrderBooksThreadSafe, IndexedPositionsThreadSafe, IndexedUserProfilesThreadSafe,
-        PriorityFeesThreadSafe,
     },
-    adrena_abi::{types::Position, LimitOrderBook, Pool, UserProfile},
+    adrena_abi::{types::Position, LimitOrderBook, UserProfile},
     anchor_client::{Client, Cluster},
     futures::{channel::mpsc::SendError, Sink, SinkExt},
     solana_sdk::{pubkey::Pubkey, signature::Keypair},
@@ -40,9 +38,7 @@ pub async fn process_stream_message<S>(
     indexed_user_profiles: &IndexedUserProfilesThreadSafe,
     payer: &Arc<Keypair>,
     endpoint: &str,
-    pool: &Pool,
     subscribe_tx: &mut S,
-    priority_fees: &PriorityFeesThreadSafe,
 ) -> Result<(), backoff::Error<anyhow::Error>>
 where
     S: Sink<SubscribeRequest, Error = SendError> + Unpin,
@@ -60,28 +56,6 @@ where
                     let account_key = Pubkey::try_from(account.pubkey).expect("valid pubkey");
                     let account_data = account.data.to_vec();
                     // Each loop iteration we check if we need to update the subscription request based on what previously happened
-
-                    if msg.filters.contains(&"price_feeds".to_owned()) {
-                        // let start = std::time::Instant::now();
-                        evaluate_and_run_automated_orders(
-                            &account_key,
-                            &account_data,
-                            indexed_positions,
-                            indexed_custodies,
-                            indexed_limit_order_books,
-                            indexed_user_profiles,
-                            payer,
-                            endpoint,
-                            pool,
-                            priority_fees,
-                        )
-                        .await?;
-                        // log::info!(
-                        //     "   <*> evaluate_and_run_automated_orders took {:?}",
-                        //     start.elapsed()
-                        // );
-                        // No subscriptions update needed here as this will trigger the update in the next cycle for position change (and update filters there)
-                    }
 
                     if msg.filters.contains(&"positions_create_update".to_owned()) {
                         // Updates the indexed positions map
@@ -241,13 +215,8 @@ where
     // Update the subscriptions request if needed
     if subscriptions_update_required {
         log::info!("  <> Update subscriptions request");
-        let accounts_filter_map = generate_accounts_filter_map(
-            indexed_custodies,
-            indexed_positions,
-            indexed_limit_order_books,
-            indexed_user_profiles,
-        )
-        .await;
+        let accounts_filter_map =
+            generate_accounts_filter_map(indexed_positions, indexed_limit_order_books, indexed_user_profiles).await;
         let request = SubscribeRequest {
             ping: None, //Some(SubscribeRequestPing { id: 1 }),
             accounts: accounts_filter_map,
