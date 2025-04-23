@@ -1,7 +1,7 @@
 use {
     crate::{
-        handlers::create_execute_limit_order_long_ix, IndexedCustodiesThreadSafe, PriorityFeesThreadSafe,
-        EXECUTE_LIMIT_ORDER_LONG_CU_LIMIT,
+        handlers::create_execute_limit_order_long_ix, ChaosLabsBatchPricesThreadSafe, IndexedCustodiesThreadSafe,
+        PriorityFeesThreadSafe, EXECUTE_LIMIT_ORDER_LONG_CU_LIMIT,
     },
     adrena_abi::{LimitOrder, LimitOrderBook},
     anchor_client::Program,
@@ -17,6 +17,7 @@ pub async fn execute_limit_order_long(
     indexed_custodies: &IndexedCustodiesThreadSafe,
     program: &Program<Arc<Keypair>>,
     priority_fees: &PriorityFeesThreadSafe,
+    oracle_prices: &ChaosLabsBatchPricesThreadSafe,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
     let indexed_custodies_read = indexed_custodies.read().await;
     let custody = indexed_custodies_read.get(&limit_order.custody).unwrap();
@@ -55,9 +56,9 @@ pub async fn execute_limit_order_long(
         &collateral_escrow_pda,
         &limit_order_book_pda,
         &limit_order.custody,
-        custody,    
+        custody,
         &oracle_pda,
-        None,
+        Some(oracle_prices.read().await.clone()),
         limit_order.id,
     );
 

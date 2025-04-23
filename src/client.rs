@@ -4,8 +4,11 @@ use {
         update_indexes::update_indexed_custodies,
     },
     adrena_abi::{
-        limited_string::LimitedString, main_pool::USDC_CUSTODY_ID, oracle::OraclePrice, types::Position, LimitOrderBook, Pool,
-        UserProfile,
+        limited_string::LimitedString,
+        main_pool::USDC_CUSTODY_ID,
+        oracle::{ChaosLabsBatchPrices, OraclePrice},
+        types::Position,
+        LimitOrderBook, Pool, UserProfile,
     },
     anchor_client::{solana_sdk::signer::keypair::read_keypair_file, Client, Cluster},
     api::get_last_trading_prices,
@@ -41,6 +44,8 @@ type IndexedLimitOrderBooksThreadSafe = Arc<RwLock<HashMap<Pubkey, adrena_abi::t
 type IndexedUserProfilesThreadSafe = Arc<RwLock<HashMap<Pubkey, adrena_abi::types::UserProfile>>>;
 type PriorityFeesThreadSafe = Arc<RwLock<PriorityFees>>;
 type LastTradingPricesThreadSafe = Arc<RwLock<HashMap<LimitedString, OraclePrice>>>;
+type ChaosLabsBatchPricesThreadSafe = Arc<RwLock<ChaosLabsBatchPrices>>;
+
 // https://solscan.io/account/rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ
 pub const PYTH_RECEIVER_PROGRAM: &str = "rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ";
 
@@ -440,6 +445,12 @@ async fn main() -> anyhow::Result<()> {
             // Side thread to fetch the last trading prices every 400 milliseconds
             // ////////////////////////////////////////////////////////////////
             let last_oracle_prices: LastTradingPricesThreadSafe = Arc::new(RwLock::new(HashMap::new()));
+            let oracle_prices: ChaosLabsBatchPricesThreadSafe = Arc::new(RwLock::new(ChaosLabsBatchPrices {
+                prices: vec![],
+                signature: [0; 64],
+                recovery_id: 0,
+            }));
+            let mut oracle_prices_fetched = false;
             // Spawn a task to poll last trading prices every 400 milliseconds
             log::info!("4.2 - Spawn a task to poll last trading prices every 400 milliseconds...");
             #[allow(unused_assignments)]
@@ -447,15 +458,18 @@ async fn main() -> anyhow::Result<()> {
                 periodical_last_trading_prices_fetching_task = Some({
                     let last_oracle_prices = Arc::clone(&last_oracle_prices);
 
+                    let oracle_prices = oracle_prices.clone();
                     tokio::spawn(async move {
                         let mut fee_refresh_interval = interval(LAST_TRADING_PRICES_REFRESH_INTERVAL);
                         loop {
                             fee_refresh_interval.tick().await;
                             let mut last_oracle_prices_write = last_oracle_prices.write().await;
 
-                            if let Ok(prices) = get_last_trading_prices().await {
+                            if let Ok((prices, batch_update_format)) = get_last_trading_prices().await {
                                 log::info!("  <> Last trading prices fetched: {:?}", prices);
                                 *last_oracle_prices_write = prices;
+                                *oracle_prices.write().await = batch_update_format;
+                                oracle_prices_fetched = true;
                             }
                         }
                     })
@@ -470,10 +484,15 @@ async fn main() -> anyhow::Result<()> {
             // ////////////////////////////////////////////////////////////////
             log::info!("5 - Start core loop: processing gRPC stream updates and evaluating automated orders...");
             let mut automated_orders_interval = tokio::time::interval(LAST_TRADING_PRICES_REFRESH_INTERVAL);
+
             loop {
                 // [Execute a task every 400 milliseconds to evaluate automated orders]
                 tokio::select! {
                     _ = automated_orders_interval.tick() => {
+                        if !oracle_prices_fetched {
+                            log::warn!("Oracle prices not fetched yet, skipping...");
+                            continue;
+                        }
                         for last_oracle_price in last_oracle_prices.read().await.iter() {
                             evaluate_and_run_automated_orders(
                                 &indexed_positions,
@@ -485,6 +504,7 @@ async fn main() -> anyhow::Result<()> {
                                 &pool,
                                 &priority_fees,
                                 &last_oracle_price.1,
+                                &oracle_prices,
                             )
                             .await?;
                         }

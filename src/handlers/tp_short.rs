@@ -1,7 +1,7 @@
 use {
     crate::{
         handlers::{create_ixs::create_close_position_short_ix, liquidate_long::calculate_size_risk_adjusted_position_fees},
-        IndexedCustodiesThreadSafe, PriorityFeesThreadSafe, CLOSE_POSITION_SHORT_CU_LIMIT,
+        ChaosLabsBatchPricesThreadSafe, IndexedCustodiesThreadSafe, PriorityFeesThreadSafe, CLOSE_POSITION_SHORT_CU_LIMIT,
     },
     adrena_abi::{oracle::OraclePrice, Position, SPL_ASSOCIATED_TOKEN_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID},
     anchor_client::Program,
@@ -20,6 +20,7 @@ pub async fn tp_short(
     priority_fees: &PriorityFeesThreadSafe,
     user_profile: Option<Pubkey>,
     referrer_profile: Option<Pubkey>,
+    oracle_prices: &ChaosLabsBatchPricesThreadSafe,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
     if position.take_profit_reached(oracle_price.price) {
         log::info!(
@@ -59,7 +60,7 @@ pub async fn tp_short(
         referrer_profile,
         &collateral_custody,
         &oracle_pda,
-        None,
+        Some(oracle_prices.read().await.clone()),
         position.take_profit_limit_price,
     );
 

@@ -1,7 +1,7 @@
 use {
     crate::{
-        handlers::create_execute_limit_order_short_ix, IndexedCustodiesThreadSafe, PriorityFeesThreadSafe,
-        EXECUTE_LIMIT_ORDER_SHORT_CU_LIMIT,
+        handlers::create_execute_limit_order_short_ix, ChaosLabsBatchPricesThreadSafe, IndexedCustodiesThreadSafe,
+        PriorityFeesThreadSafe, EXECUTE_LIMIT_ORDER_SHORT_CU_LIMIT,
     },
     adrena_abi::{LimitOrder, LimitOrderBook},
     anchor_client::Program,
@@ -17,6 +17,7 @@ pub async fn execute_limit_order_short(
     indexed_custodies: &IndexedCustodiesThreadSafe,
     program: &Program<Arc<Keypair>>,
     priority_fees: &PriorityFeesThreadSafe,
+    oracle_prices: &ChaosLabsBatchPricesThreadSafe,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
     let indexed_custodies_read = indexed_custodies.read().await;
     let custody = indexed_custodies_read.get(&limit_order.custody).unwrap();
@@ -58,7 +59,7 @@ pub async fn execute_limit_order_short(
         &limit_order.collateral_custody,
         custody,
         &oracle_pda,
-        None,
+        Some(oracle_prices.read().await.clone()),
         limit_order.id,
     );
 

@@ -2,12 +2,15 @@
     "cSpell.words": [
         "adrena",
         "Bfgwp",
+        "bonkusd",
         "borsh",
+        "btcusd",
         "chrono",
         "codegen",
         "dalek",
         "Datasize",
         "grpf",
+        "jitosolusd",
         "lobcu",
         "maplit",
         "nonblocking",
@@ -20,7 +23,10 @@
         "reqwest",
         "sablier",
         "serde",
+        "solusd",
         "thiserror",
+        "usdcusd",
+        "wbtcusd",
         "Zeroable"
     ]
 }

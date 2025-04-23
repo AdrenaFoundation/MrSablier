@@ -1,7 +1,7 @@
 use {
     crate::{
         handlers::{create_close_position_long_ix, liquidate_long::calculate_size_risk_adjusted_position_fees},
-        IndexedCustodiesThreadSafe, PriorityFeesThreadSafe, CLOSE_POSITION_LONG_CU_LIMIT,
+        ChaosLabsBatchPricesThreadSafe, IndexedCustodiesThreadSafe, PriorityFeesThreadSafe, CLOSE_POSITION_LONG_CU_LIMIT,
     },
     adrena_abi::{
         get_transfer_authority_pda, oracle::OraclePrice, Position, SPL_ASSOCIATED_TOKEN_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID,
@@ -22,6 +22,7 @@ pub async fn sl_long(
     priority_fees: &PriorityFeesThreadSafe,
     user_profile: Option<Pubkey>,
     referrer_profile: Option<Pubkey>,
+    oracle_prices: &ChaosLabsBatchPricesThreadSafe,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
     if position.stop_loss_reached(oracle_price.price) {
         // no op
@@ -74,7 +75,7 @@ pub async fn sl_long(
         referrer_profile,
         custody,
         &oracle_pda,
-        None,
+        Some(oracle_prices.read().await.clone()),
         position.stop_loss_close_position_price,
     );
 

@@ -1,5 +1,8 @@
 use {
-    crate::{handlers::create_liquidate_long_ix, IndexedCustodiesThreadSafe, PriorityFeesThreadSafe, LIQUIDATE_LONG_CU_LIMIT},
+    crate::{
+        handlers::create_liquidate_long_ix, ChaosLabsBatchPricesThreadSafe, IndexedCustodiesThreadSafe, PriorityFeesThreadSafe,
+        LIQUIDATE_LONG_CU_LIMIT,
+    },
     adrena_abi::{
         oracle::OraclePrice, LeverageCheckStatus, Pool, Position, SPL_ASSOCIATED_TOKEN_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID,
     },
@@ -20,6 +23,7 @@ pub async fn liquidate_long(
     priority_fees: &PriorityFeesThreadSafe,
     user_profile: Option<Pubkey>,
     referrer_profile: Option<Pubkey>,
+    oracle_prices: &ChaosLabsBatchPricesThreadSafe,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
     let current_time = chrono::Utc::now().timestamp();
 
@@ -86,7 +90,7 @@ pub async fn liquidate_long(
         user_profile,
         referrer_profile,
         &oracle_pda,
-        None,
+        Some(oracle_prices.read().await.clone()),
     );
 
     let (_, priority_fee) = calculate_fee_risk_adjusted_position_fees(&position, &indexed_custodies, &priority_fees).await?;

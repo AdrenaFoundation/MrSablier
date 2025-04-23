@@ -1,8 +1,8 @@
 use {
     crate::{
         handlers::{self},
-        IndexedCustodiesThreadSafe, IndexedLimitOrderBooksThreadSafe, IndexedPositionsThreadSafe, IndexedUserProfilesThreadSafe,
-        PriorityFeesThreadSafe,
+        ChaosLabsBatchPricesThreadSafe, IndexedCustodiesThreadSafe, IndexedLimitOrderBooksThreadSafe, IndexedPositionsThreadSafe,
+        IndexedUserProfilesThreadSafe, PriorityFeesThreadSafe,
     },
     adrena_abi::{oracle::OraclePrice, Pool, Side},
     anchor_client::{Client, Cluster},
@@ -20,7 +20,10 @@ pub async fn evaluate_and_run_automated_orders(
     endpoint: &str,
     pool: &Pool,
     priority_fees: &PriorityFeesThreadSafe,
+    // The price we use to evaluate the conditions
     oracle_price: &OraclePrice,
+    // The fresh oracle data to pass along with the instructions
+    oracle_prices: &ChaosLabsBatchPricesThreadSafe,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
     // Find the custody key associated with the trade oracle key
     let associated_custody_key = indexed_custodies
@@ -81,6 +84,7 @@ pub async fn evaluate_and_run_automated_orders(
         };
 
         let oracle_price = oracle_price.clone();
+        let oracle_prices = oracle_prices.clone();
         let task = tokio::spawn(async move {
             let result: Result<(), anyhow::Error> = async {
                 match position.get_side() {
@@ -96,6 +100,7 @@ pub async fn evaluate_and_run_automated_orders(
                                 &priority_fees,
                                 user_profile,
                                 referrer_profile,
+                                &oracle_prices,
                             )
                             .await
                             {
@@ -114,6 +119,7 @@ pub async fn evaluate_and_run_automated_orders(
                                 &priority_fees,
                                 user_profile,
                                 referrer_profile,
+                                &oracle_prices,
                             )
                             .await
                             {
@@ -132,6 +138,7 @@ pub async fn evaluate_and_run_automated_orders(
                             &priority_fees,
                             user_profile,
                             referrer_profile,
+                            &oracle_prices,
                         )
                         .await
                         {
@@ -150,6 +157,7 @@ pub async fn evaluate_and_run_automated_orders(
                                 &priority_fees,
                                 user_profile,
                                 referrer_profile,
+                                &oracle_prices,
                             )
                             .await
                             {
@@ -168,6 +176,7 @@ pub async fn evaluate_and_run_automated_orders(
                                 &priority_fees,
                                 user_profile,
                                 referrer_profile,
+                                &oracle_prices,
                             )
                             .await
                             {
@@ -186,6 +195,7 @@ pub async fn evaluate_and_run_automated_orders(
                             &priority_fees,
                             user_profile,
                             referrer_profile,
+                            &oracle_prices,
                         )
                         .await
                         {
@@ -234,6 +244,7 @@ pub async fn evaluate_and_run_automated_orders(
                 .map_err(|e| backoff::Error::transient(e.into()))?;
 
             let oracle_price = oracle_price.clone();
+            let oracle_prices = oracle_prices.clone();
             let task = tokio::spawn(async move {
                 let result: Result<(), anyhow::Error> = async {
                     match limit_order.get_side() {
@@ -246,6 +257,7 @@ pub async fn evaluate_and_run_automated_orders(
                                     &indexed_custodies,
                                     &program,
                                     &priority_fees,
+                                    &oracle_prices,
                                 )
                                 .await
                                 {
@@ -262,6 +274,7 @@ pub async fn evaluate_and_run_automated_orders(
                                     &indexed_custodies,
                                     &program,
                                     &priority_fees,
+                                    &oracle_prices,
                                 )
                                 .await
                                 {
