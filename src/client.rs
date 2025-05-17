@@ -451,6 +451,7 @@ async fn main() -> anyhow::Result<()> {
                 recovery_id: 0,
             }));
             let mut oracle_prices_fetched = false;
+            // TODO: use database instead of API
             // Spawn a task to poll last trading prices every 400 milliseconds
             log::info!("4.2 - Spawn a task to poll last trading prices every 400 milliseconds...");
             #[allow(unused_assignments)]
