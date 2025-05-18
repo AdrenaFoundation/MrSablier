@@ -42,7 +42,6 @@ pub async fn get_last_trading_prices(
         .send()
         .await
         .map_err(|e| backoff::Error::Permanent(anyhow::anyhow!("Failed to send request: {}", e)))?;
-
     if !response.status().is_success() {
         return Err(backoff::Error::Permanent(anyhow::anyhow!(
             "Failed to fetch last trading prices"
@@ -56,7 +55,6 @@ pub async fn get_last_trading_prices(
 
     let response: LastTradingPricesResponse = serde_json::from_str(&body)
         .map_err(|e| backoff::Error::Permanent(anyhow::anyhow!("Failed to parse last trading prices: {}", e)))?;
-
     Ok((parse_last_trading_prices(&response), parse_chaos_labs_batch_prices(&response)))
 }
 
@@ -64,16 +62,12 @@ fn parse_last_trading_prices(response: &LastTradingPricesResponse) -> HashMap<Li
     let mut prices = HashMap::new();
 
     for price_data in response.data.prices.iter() {
-        prices.insert(
-            LimitedString::new(price_data.symbol.clone()),
-            OraclePrice::new(
-                price_data.price.as_u64().unwrap(),
-                -10,
-                price_data.timestamp.as_u64().unwrap(),
-            ),
-        );
+        let price = price_data.price.as_u64().unwrap();
+        let exponent = price_data.exponent as i32;
+        let timestamp = price_data.timestamp.as_i64().unwrap();
+        let name = LimitedString::new(price_data.symbol.clone());
+        prices.insert(name.clone(), OraclePrice::new(price, exponent, 0, timestamp, &name));
     }
-
     prices
 }
 
@@ -82,7 +76,6 @@ fn parse_chaos_labs_batch_prices(response: &LastTradingPricesResponse) -> ChaosL
         let vec = Vec::from_hex(&response.data.signature).unwrap();
         vec.try_into().expect("Hex string has incorrect length")
     };
-
     let batch_prices = ChaosLabsBatchPrices {
         prices: response
             .data
@@ -97,6 +90,5 @@ fn parse_chaos_labs_batch_prices(response: &LastTradingPricesResponse) -> ChaosL
         signature: signature_vec,
         recovery_id: response.data.recovery_id,
     };
-
     batch_prices
 }

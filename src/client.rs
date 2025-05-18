@@ -450,7 +450,6 @@ async fn main() -> anyhow::Result<()> {
                 signature: [0; 64],
                 recovery_id: 0,
             }));
-            let mut oracle_prices_fetched = false;
             // TODO: use database instead of API
             // Spawn a task to poll last trading prices every 400 milliseconds
             log::info!("4.2 - Spawn a task to poll last trading prices every 400 milliseconds...");
@@ -467,10 +466,9 @@ async fn main() -> anyhow::Result<()> {
                             let mut last_oracle_prices_write = last_oracle_prices.write().await;
 
                             if let Ok((prices, batch_update_format)) = get_last_trading_prices().await {
-                                log::info!("  <> Last trading prices fetched: {:?}", prices);
+                                // log::info!("  <> Last trading prices fetched: {:?}", prices);
                                 *last_oracle_prices_write = prices;
                                 *oracle_prices.write().await = batch_update_format;
-                                oracle_prices_fetched = true;
                             }
                         }
                     })
@@ -490,12 +488,13 @@ async fn main() -> anyhow::Result<()> {
                 // [Execute a task every 400 milliseconds to evaluate automated orders]
                 tokio::select! {
                     _ = automated_orders_interval.tick() => {
-                        if !oracle_prices_fetched {
-                            log::warn!("Oracle prices not fetched yet, skipping...");
-                            continue;
-                        }
                         for last_oracle_price in last_oracle_prices.read().await.iter() {
-                            evaluate_and_run_automated_orders(
+                            if last_oracle_price.1.name == LimitedString::new("SOLUSD")
+                                || last_oracle_price.1.name == LimitedString::new("USDCUSD")
+                                || last_oracle_price.1.name == LimitedString::new("BONKUSD")
+                                || last_oracle_price.1.name == LimitedString::new("BTCUSD")
+                            {
+                             evaluate_and_run_automated_orders(
                                 &indexed_positions,
                                 &indexed_custodies,
                                 &indexed_limit_order_books,
@@ -505,9 +504,10 @@ async fn main() -> anyhow::Result<()> {
                                 &pool,
                                 &priority_fees,
                                 &last_oracle_price.1,
-                                &oracle_prices,
-                            )
-                            .await?;
+                                    &oracle_prices,
+                                )
+                                .await?;
+                            }
                         }
                     }
                     // [Otherwise, process messages from the stream]

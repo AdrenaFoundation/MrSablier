@@ -4,7 +4,8 @@ use {
         ChaosLabsBatchPricesThreadSafe, IndexedCustodiesThreadSafe, PriorityFeesThreadSafe, LIQUIDATE_SHORT_CU_LIMIT,
     },
     adrena_abi::{
-        oracle::OraclePrice, LeverageCheckStatus, Pool, Position, SPL_ASSOCIATED_TOKEN_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID,
+        limited_string::LimitedString, oracle::OraclePrice, LeverageCheckStatus, Pool, Position, SPL_ASSOCIATED_TOKEN_PROGRAM_ID,
+        SPL_TOKEN_PROGRAM_ID,
     },
     anchor_client::Program,
     solana_client::rpc_config::RpcSendTransactionConfig,
@@ -33,7 +34,7 @@ pub async fn liquidate_short(
     let oracle_pda = adrena_abi::pda::get_oracle_pda().0;
 
     // here we use the USDC price of 1 for simplicity
-    let mock_collateral_token_price = OraclePrice::new(1_000_000, -6, 0);
+    let mock_collateral_token_price = OraclePrice::new(1_000_000, -6, 0, current_time, &LimitedString::new("whatever"));
 
     let position_leverage_status = pool.check_leverage(
         &position,
