@@ -1,7 +1,17 @@
 use {
-    crate::{process_stream_message::process_stream_message, update_indexes::update_indexed_custodies},
-    adrena_abi::{main_pool::USDC_CUSTODY_ID, types::Position, LimitOrderBook, Pool, UserProfile},
+    crate::{
+        evaluate_and_run_automated_orders::evaluate_and_run_automated_orders, process_stream_message::process_stream_message,
+        update_indexes::update_indexed_custodies,
+    },
+    adrena_abi::{
+        limited_string::LimitedString,
+        main_pool::USDC_CUSTODY_ID,
+        oracle::{ChaosLabsBatchPrices, OraclePrice},
+        types::Position,
+        LimitOrderBook, Pool, UserProfile,
+    },
     anchor_client::{solana_sdk::signer::keypair::read_keypair_file, Client, Cluster},
+    api::get_last_trading_prices,
     backoff::{future::retry, ExponentialBackoff},
     clap::Parser,
     futures::{StreamExt, TryFutureExt},
@@ -33,9 +43,13 @@ type IndexedCustodiesThreadSafe = Arc<RwLock<HashMap<Pubkey, adrena_abi::types::
 type IndexedLimitOrderBooksThreadSafe = Arc<RwLock<HashMap<Pubkey, adrena_abi::types::LimitOrderBook>>>;
 type IndexedUserProfilesThreadSafe = Arc<RwLock<HashMap<Pubkey, adrena_abi::types::UserProfile>>>;
 type PriorityFeesThreadSafe = Arc<RwLock<PriorityFees>>;
+type LastTradingPricesThreadSafe = Arc<RwLock<HashMap<LimitedString, OraclePrice>>>;
+type ChaosLabsBatchPricesThreadSafe = Arc<RwLock<ChaosLabsBatchPrices>>;
+
 // https://solscan.io/account/rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ
 pub const PYTH_RECEIVER_PROGRAM: &str = "rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ";
 
+pub mod api;
 pub mod evaluate_and_run_automated_orders;
 pub mod handlers;
 pub mod priority_fees;
@@ -50,6 +64,7 @@ const MEDIAN_PRIORITY_FEE_PERCENTILE: u64 = 5000; // 50th
 const HIGH_PRIORITY_FEE_PERCENTILE: u64 = 7000; // 70th
 const ULTRA_PRIORITY_FEE_PERCENTILE: u64 = 9000; // 90th
 const PRIORITY_FEE_REFRESH_INTERVAL: Duration = Duration::from_secs(5); // seconds
+const LAST_TRADING_PRICES_REFRESH_INTERVAL: Duration = Duration::from_millis(400); // milliseconds
 pub const CLOSE_POSITION_LONG_CU_LIMIT: u32 = 385_000;
 pub const CLOSE_POSITION_SHORT_CU_LIMIT: u32 = 285_000;
 pub const CLEANUP_POSITION_CU_LIMIT: u32 = 60_000;
@@ -125,19 +140,10 @@ pub fn get_user_profile_anchor_discriminator() -> Vec<u8> {
 }
 
 async fn generate_accounts_filter_map(
-    indexed_custodies: &IndexedCustodiesThreadSafe,
     indexed_positions: &IndexedPositionsThreadSafe,
     indexed_limit_order_books: &IndexedLimitOrderBooksThreadSafe,
     indexed_user_profiles: &IndexedUserProfilesThreadSafe,
 ) -> AccountFilterMap {
-    // Retrieve the price update v2 pdas from the indexed custodies
-    let trade_oracle_keys: Vec<String> = indexed_custodies
-        .read()
-        .await
-        .values()
-        .map(|c| c.trade_oracle.to_string())
-        .collect();
-
     // Retrieve the existing positions keys - they are monitored for close events
     let existing_positions_keys: Vec<String> = indexed_positions.read().await.keys().map(|p| p.to_string()).collect();
 
@@ -253,18 +259,6 @@ async fn generate_accounts_filter_map(
         );
     }
 
-    // Price update v2 pdas - the price updates
-    let price_feed_owner = vec![PYTH_RECEIVER_PROGRAM.to_owned()];
-    accounts_filter_map.insert(
-        "price_feeds".to_owned(),
-        SubscribeRequestFilterAccounts {
-            account: trade_oracle_keys,
-            owner: price_feed_owner,
-            filters: vec![],
-            nonempty_txn_signature: None,
-        },
-    );
-
     accounts_filter_map
 }
 
@@ -304,10 +298,13 @@ async fn main() -> anyhow::Result<()> {
         let indexed_limit_order_books = Arc::clone(&indexed_limit_order_books);
         let indexed_user_profiles = Arc::clone(&indexed_user_profiles);
         let mut periodical_priority_fees_fetching_task: Option<JoinHandle<Result<(), backoff::Error<anyhow::Error>>>> = None;
-
+        let mut periodical_last_trading_prices_fetching_task: Option<JoinHandle<Result<(), backoff::Error<anyhow::Error>>>> = None;
         async move {
             // In case it errored out, abort the fee task (will be recreated)
             if let Some(t) = periodical_priority_fees_fetching_task.take() {
+                t.abort();
+            }
+            if let Some(t) = periodical_last_trading_prices_fetching_task.take() {
                 t.abort();
             }
 
@@ -391,7 +388,7 @@ async fn main() -> anyhow::Result<()> {
             // to inform the server about the accounts we are interested in observing changes to
             // ////////////////////////////////////////////////////////////////
             log::info!("3 - Generate subscription request and open stream...");
-            let accounts_filter_map = generate_accounts_filter_map(&indexed_custodies, &indexed_positions, &indexed_limit_order_books, &indexed_user_profiles).await;
+            let accounts_filter_map = generate_accounts_filter_map(&indexed_positions, &indexed_limit_order_books, &indexed_user_profiles).await;
             log::info!("  <> Account filter map initialized");
             let (mut subscribe_tx, mut stream) = {
                 let request = SubscribeRequest {
@@ -418,78 +415,139 @@ async fn main() -> anyhow::Result<()> {
                 ultra: 0,
             }));
             // Spawn a task to poll priority fees every 5 seconds
-            log::info!("4 - Spawn a task to poll priority fees every 5 seconds...");
+            log::info!("4.1 - Spawn a task to poll priority fees every 5 seconds...");
             #[allow(unused_assignments)]
             {
-            periodical_priority_fees_fetching_task = Some({
-                let priority_fees = Arc::clone(&priority_fees);
+                periodical_priority_fees_fetching_task = Some({
+                    let priority_fees = Arc::clone(&priority_fees);
 
-                tokio::spawn(async move {
-                    let mut fee_refresh_interval = interval(PRIORITY_FEE_REFRESH_INTERVAL);
-                    loop {
-                        fee_refresh_interval.tick().await;
-                        let mut priority_fees_write = priority_fees.write().await;
+                    tokio::spawn(async move {
+                        let mut fee_refresh_interval = interval(PRIORITY_FEE_REFRESH_INTERVAL);
+                        loop {
+                            fee_refresh_interval.tick().await;
+                            let mut priority_fees_write = priority_fees.write().await;
 
-                        if let Ok(fee) = fetch_mean_priority_fee(&client, MEDIAN_PRIORITY_FEE_PERCENTILE).await {
-                            priority_fees_write.median = fee;
+                            if let Ok(fee) = fetch_mean_priority_fee(&client, MEDIAN_PRIORITY_FEE_PERCENTILE).await {
+                                priority_fees_write.median = fee;
+                            }
+                            if let Ok(fee) = fetch_mean_priority_fee(&client, HIGH_PRIORITY_FEE_PERCENTILE).await {
+                                priority_fees_write.high = fee;
+                            }
+                            if let Ok(fee) = fetch_mean_priority_fee(&client, ULTRA_PRIORITY_FEE_PERCENTILE).await {
+                                priority_fees_write.ultra = fee;
+                            }
                         }
-                        if let Ok(fee) = fetch_mean_priority_fee(&client, HIGH_PRIORITY_FEE_PERCENTILE).await {
-                            priority_fees_write.high = fee;
+                    })
+                });
+            }
+
+            // ////////////////////////////////////////////////////////////////
+            // Side thread to fetch the last trading prices every 400 milliseconds
+            // ////////////////////////////////////////////////////////////////
+            let last_oracle_prices: LastTradingPricesThreadSafe = Arc::new(RwLock::new(HashMap::new()));
+            let oracle_prices: ChaosLabsBatchPricesThreadSafe = Arc::new(RwLock::new(ChaosLabsBatchPrices {
+                prices: vec![],
+                signature: [0; 64],
+                recovery_id: 0,
+            }));
+            let mut oracle_prices_fetched = false;
+            // TODO: use database instead of API
+            // Spawn a task to poll last trading prices every 400 milliseconds
+            log::info!("4.2 - Spawn a task to poll last trading prices every 400 milliseconds...");
+            #[allow(unused_assignments)]
+            {
+                periodical_last_trading_prices_fetching_task = Some({
+                    let last_oracle_prices = Arc::clone(&last_oracle_prices);
+
+                    let oracle_prices = oracle_prices.clone();
+                    tokio::spawn(async move {
+                        let mut fee_refresh_interval = interval(LAST_TRADING_PRICES_REFRESH_INTERVAL);
+                        loop {
+                            fee_refresh_interval.tick().await;
+                            let mut last_oracle_prices_write = last_oracle_prices.write().await;
+
+                            if let Ok((prices, batch_update_format)) = get_last_trading_prices().await {
+                                log::info!("  <> Last trading prices fetched: {:?}", prices);
+                                *last_oracle_prices_write = prices;
+                                *oracle_prices.write().await = batch_update_format;
+                                oracle_prices_fetched = true;
+                            }
                         }
-                        if let Ok(fee) = fetch_mean_priority_fee(&client, ULTRA_PRIORITY_FEE_PERCENTILE).await {
-                            priority_fees_write.ultra = fee;
-                        }
-                    }
-                })
-            });
+                    })
+                });
             }
 
             // ////////////////////////////////////////////////////////////////
             // CORE LOOP
             //
-            // Here we wait for new messages from the stream and process them
-            // if coming from the price update v2 accounts, we check for
-            // liquidation/sl/tp conditions on the already indexed positions if
-            // coming from the position accounts, we update the indexed positions map
+            // Here we wait for new messages from the stream and update the indexed state
+            // Every 400ms we evaluate automated orders based on the last trading prices fetched from data API
             // ////////////////////////////////////////////////////////////////
-            log::info!("5 - Start core loop: processing gRPC stream...");
+            log::info!("5 - Start core loop: processing gRPC stream updates and evaluating automated orders...");
+            let mut automated_orders_interval = tokio::time::interval(LAST_TRADING_PRICES_REFRESH_INTERVAL);
+
             loop {
-                match timeout(Duration::from_secs(11), stream.next()).await {
-                    Ok(Some(message)) => {
-                        match process_stream_message(
-                            message.map_err(|e| backoff::Error::transient(e.into())),
-                            &indexed_positions,
-                            &indexed_custodies,
-                            &indexed_limit_order_books,
-                            &indexed_user_profiles,
-                            &payer,
-                            &args.endpoint.clone(),
-                            &pool,
-                            &mut subscribe_tx,
-                            &priority_fees,
-                        )
-                        .await
-                        {
-                            Ok(_) => continue,
-                            Err(backoff::Error::Permanent(e)) => {
-                                log::error!("Permanent error: {:?}", e);
-                                break;
-                            }
-                            Err(backoff::Error::Transient { err, .. }) => {
-                                log::warn!("Transient error: {:?}", err);
-                                // Handle transient error without breaking the loop
-                            }
+                // [Execute a task every 400 milliseconds to evaluate automated orders]
+                tokio::select! {
+                    _ = automated_orders_interval.tick() => {
+                        if !oracle_prices_fetched {
+                            log::warn!("Oracle prices not fetched yet, skipping...");
+                            continue;
+                        }
+                        for last_oracle_price in last_oracle_prices.read().await.iter() {
+                            evaluate_and_run_automated_orders(
+                                &indexed_positions,
+                                &indexed_custodies,
+                                &indexed_limit_order_books,
+                                &indexed_user_profiles,
+                                &payer,
+                                &args.endpoint,
+                                &pool,
+                                &priority_fees,
+                                &last_oracle_price.1,
+                                &oracle_prices,
+                            )
+                            .await?;
                         }
                     }
-                    Ok(None) => {
-                        log::warn!("Stream closed by server - restarting connection");
-                        return Err(backoff::Error::transient(anyhow::anyhow!("Server Closed Connection")));
-                    }
-                    Err(_) => {
-                        log::warn!(
-                            "No message received in 11 seconds, restarting connection (we should be getting at least a ping every 10 seconds)"
-                        );
-                        return Err(backoff::Error::transient(anyhow::anyhow!("Timeout")));
+                    // [Otherwise, process messages from the stream]
+                    message = timeout(Duration::from_secs(11), stream.next()) => {
+                        match message {
+                            Ok(Some(message)) => {
+                                match process_stream_message(
+                                    message.map_err(|e| backoff::Error::transient(e.into())),
+                                    &indexed_positions,
+                                    &indexed_custodies,
+                                    &indexed_limit_order_books,
+                                    &indexed_user_profiles,
+                                    &payer,
+                                    &args.endpoint.clone(),
+                                    &mut subscribe_tx,
+                                )
+                                .await
+                                {
+                                    Ok(_) => continue,
+                                    Err(backoff::Error::Permanent(e)) => {
+                                        log::error!("Permanent error: {:?}", e);
+                                        break;
+                                    }
+                                    Err(backoff::Error::Transient { err, .. }) => {
+                                        log::warn!("Transient error: {:?}", err);
+                                        // Handle transient error without breaking the loop
+                                    }
+                                }
+                            }
+                            Ok(None) => {
+                                log::warn!("Stream closed by server - restarting connection");
+                                return Err(backoff::Error::transient(anyhow::anyhow!("Server Closed Connection")));
+                            }
+                            Err(_) => {
+                                log::warn!(
+                                    "No message received in 11 seconds, restarting connection (we should be getting at least a ping every 10 seconds)"
+                                );
+                                return Err(backoff::Error::transient(anyhow::anyhow!("Timeout")));
+                            }
+                        }
                     }
                 }
             }

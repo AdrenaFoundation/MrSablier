@@ -1,9 +1,9 @@
 use {
     crate::{
         handlers::{create_ixs::create_close_position_short_ix, liquidate_long::calculate_size_risk_adjusted_position_fees},
-        IndexedCustodiesThreadSafe, PriorityFeesThreadSafe, CLOSE_POSITION_SHORT_CU_LIMIT,
+        ChaosLabsBatchPricesThreadSafe, IndexedCustodiesThreadSafe, PriorityFeesThreadSafe, CLOSE_POSITION_SHORT_CU_LIMIT,
     },
-    adrena_abi::{oracle_price::OraclePrice, Position, SPL_ASSOCIATED_TOKEN_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID},
+    adrena_abi::{oracle::OraclePrice, Position, SPL_ASSOCIATED_TOKEN_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID},
     anchor_client::Program,
     solana_client::rpc_config::RpcSendTransactionConfig,
     solana_sdk::{compute_budget::ComputeBudgetInstruction, pubkey::Pubkey, signature::Keypair},
@@ -20,6 +20,7 @@ pub async fn sl_short(
     priority_fees: &PriorityFeesThreadSafe,
     user_profile: Option<Pubkey>,
     referrer_profile: Option<Pubkey>,
+    oracle_prices: &ChaosLabsBatchPricesThreadSafe,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
     if position.stop_loss_reached(oracle_price.price) {
         // no op
@@ -44,8 +45,8 @@ pub async fn sl_short(
     }
 
     let indexed_custodies_read = indexed_custodies.read().await;
-    let custody = indexed_custodies_read.get(&position.custody).unwrap();
     let collateral_custody = indexed_custodies_read.get(&position.collateral_custody).unwrap();
+    let oracle_pda = adrena_abi::pda::get_oracle_pda().0;
 
     let collateral_mint = collateral_custody.mint;
 
@@ -67,10 +68,11 @@ pub async fn sl_short(
         position,
         receiving_account,
         transfer_authority_pda,
-        custody,
         user_profile,
         referrer_profile,
-        collateral_custody,
+        &collateral_custody,
+        &oracle_pda,
+        Some(oracle_prices.read().await.clone()),
         position.stop_loss_close_position_price,
     );
 
