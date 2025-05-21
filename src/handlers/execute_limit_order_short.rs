@@ -57,7 +57,7 @@ pub async fn execute_limit_order_short(
         &limit_order_book_pda,
         &limit_order.custody,
         &limit_order.collateral_custody,
-        custody,
+        collateral_custody,
         &oracle_pda,
         Some(oracle_prices.read().await.clone()),
         limit_order.id,
