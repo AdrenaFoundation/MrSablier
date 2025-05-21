@@ -20,7 +20,6 @@ pub async fn execute_limit_order_short(
     oracle_prices: &ChaosLabsBatchPricesThreadSafe,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
     let indexed_custodies_read = indexed_custodies.read().await;
-    let custody = indexed_custodies_read.get(&limit_order.custody).unwrap();
     let collateral_custody = indexed_custodies_read.get(&limit_order.collateral_custody).unwrap();
 
     let pool_pda = adrena_abi::pda::get_pool_pda(&String::from("main-pool")).0;
