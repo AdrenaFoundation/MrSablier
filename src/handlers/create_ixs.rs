@@ -23,6 +23,7 @@ pub fn create_close_position_long_ix(
         params: adrena_abi::types::ClosePositionLongParams {
             price: if limit_price != 0 { Some(limit_price) } else { None },
             oracle_prices,
+            percentage: 100 * 10_000,
         },
     };
     let accounts = adrena_abi::accounts::ClosePositionLong {
@@ -64,6 +65,7 @@ pub fn create_close_position_short_ix(
         params: adrena_abi::types::ClosePositionShortParams {
             price: if limit_price != 0 { Some(limit_price) } else { None },
             oracle_prices,
+            percentage: 100 * 10_000,
         },
     };
     let accounts = adrena_abi::accounts::ClosePositionShort {
